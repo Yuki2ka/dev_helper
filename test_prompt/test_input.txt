@@ -1,0 +1,19 @@
+# project
+
+## index.html
+\\html
+<!DOCTYPE html>
+ 
+\\n
+## 1.js 
+\\javascript
+// 1.js
+
+\\n
+
+\\n
+
+## game.js — Main game logic
+\\javascript
+// game
+\\n

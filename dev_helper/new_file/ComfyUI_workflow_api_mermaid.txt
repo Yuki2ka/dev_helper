@@ -1,0 +1,54 @@
+flowchart TD
+    Start([Run script]) --> CLI["CLI args<br/>-m/--model, -p/--provider"]
+
+    %% ---------- INPUTS ----------
+    CLI --> Inputs{{"INPUT SOURCES (auto-resolved)"}}
+    Inputs --> I1["File paths: resolve_paths<br/>args -> stdin -> clipboard -> constant -> cwd"]
+    Inputs --> I2["Prompt text: resolve_input_text<br/>args -> stdin -> clipboard"]
+    Inputs --> I3["Clipboard bitmap: get_clipboard_bitmap<br/>Windows + PIL only"]
+    Inputs --> I4["CWD scan (only if origin==cwd<br/>AND no text/image input)"]
+
+    %% ---------- SELECTORS ----------
+    CLI --> S1{"HERMES == 'ask'?"}
+    S1 -->|yes| Q1[["SELECTOR: Use Hermes agent? (y/n)"]]
+    S1 -->|no| S2
+    Q1 --> S2
+
+    S2{"ONLINE == 'ask'?"} -->|yes| Q2[["SELECTOR: Include online providers? (clipboard leaves PC)"]]
+    S2 -->|no| S3
+    Q2 --> S3
+
+    S3{"PROVIDER == 'ask'/None<br/>or named provider dead?"} -->|yes| Q3[["SELECTOR: Pick provider<br/>lmstudio / ollama / llamacpp / online"]]
+    S3 -->|no| S4
+    Q3 --> S4
+
+    Inputs --> S4
+    S4{"ACTION_TYPE == 'ask'?"} -->|yes| Q4[["SELECTOR: Pick action preset<br/>booru / story / json / translate / osr"]]
+    S4 -->|no| S5
+    Q4 --> S5
+
+    S5{"action == translate<br/>AND TRANSLATION_TARGET == 'ask'/None?"} -->|yes| Q5[["SELECTOR: Enter target language"]]
+    S5 -->|no| S6
+    Q5 --> S6
+
+    S6{"multiple items (files + clip)<br/>AND MULTIPLE_FILES == 'ask'?"} -->|yes| Q6[["SELECTOR: Combine & chat  vs  1-per-prompt batch"]]
+    S6 -->|no| Mode
+    Q6 --> Mode
+
+    Mode{"Processing mode"}
+    Mode -->|"single item OR combine"| Chat
+    Mode -->|"multiple / batch"| Batch
+
+    %% ---------- BATCH ----------
+    Batch["BATCH mode (per item, auto-save)"] --> S7{"DETECT_COMPANION_FILES == 'ask'?"}
+    S7 -->|yes| Q7[["SELECTOR: Detect companion files? (asked once)"]]
+    S7 -->|no| BatchRun
+    Q7 --> BatchRun["Process each item -> save near input"]
+
+    %% ---------- CHAT ----------
+    Chat["CHAT mode (interactive)"] --> Q8[["SELECTOR: 'Prompt >' loop<br/>type text / paths; repeats until Esc"]]
+
+    classDef sel fill:#3b2f5e,stroke:#b39ddb,color:#fff;
+    classDef inp fill:#1e3a2f,stroke:#66bb6a,color:#fff;
+    class Q1,Q2,Q3,Q4,Q5,Q6,Q7,Q8 sel;
+    class I1,I2,I3,I4 inp;

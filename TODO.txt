@@ -1,0 +1,3 @@
+think about BINARY_EXTENSIONS why it need, or better to use SHOW_CONTENT_WHITELIST
+in 2way_explorer.py
+in to_clipboard.py

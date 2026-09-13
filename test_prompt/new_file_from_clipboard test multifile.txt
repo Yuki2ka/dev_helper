@@ -1,0 +1,35 @@
+
+i have clipboard
+------------
+# project
+
+## index.html
+```html
+<!DOCTYPE html>
+ 
+```
+
+## 1.js 
+```javascript
+// 1.js
+
+```
+
+
+```
+
+## game.js — Main game logic
+```javascript
+// game
+----------------
+i run  new_file_from_clipboard.py 
+i expect
+index.html
+1.js
+game.js
+and md
+
+but currently
+
+
+

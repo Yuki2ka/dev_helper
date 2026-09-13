@@ -1,0 +1,77 @@
+Now that I can see the function implementation, the answer to your previous question is: **Yes, those external `try...except` blocks were redundant, but only because the function is designed to crash on purpose.**
+
+The `resolve_paths` function explicitly ends with `raise ValueError(...)`. If you want "fast and clean" code, you should not handle this with `try...except` blocks outside the function; you should **change the function to return a default value instead of raising an error.**
+
+### The "Clean" Critique
+1. **The Error Pattern:** Raising a `ValueError` at the end of a "resolve" function forces the caller to use `try...except` everywhere. In a utility like this, returning an empty `ResolvedPaths` object is much cleaner.
+2. **Repetitive Logic:** You are calling `_create_missing_directories` and `tuple(_to_path(v)...)` in every single `if` block. This is "wet" code (Write Everything Twice).
+3. **Performance:** The loop for `const_values` can be a list comprehension, which is faster.
+
+### The "Fast and Clean" Refactor
+Here is the optimized version. It removes the need for any `try...except` blocks in your main logic and reduces the line count by consolidating the return logic.
+
+```python
+def resolve_paths(
+    args: argparse.Namespace | object | None = None,
+    *,
+    arg_names: Sequence[str] = DEFAULT_ARG_NAMES,
+    use_stdin: bool = True,
+    constant: str | os.PathLike[str] | Iterable[str | os.PathLike[str]] | None = None,
+    clipboard: bool = True,
+    fallback_to_cwd: bool = True,
+    create: CreateMode = "auto",
+) -> ResolvedPaths:
+    
+    # Define the priority chain as a list of (source_callable, origin_name)
+    # This allows us to iterate through them instead of writing 5 if-statements
+    candidates = []
+    
+    # 1. CLI args
+    cli_vals = _collect_arg_values(args, arg_names)
+    if cli_vals: candidates.append((cli_vals, "args"))
+    
+    # 2. stdin
+    if use_stdin:
+        stdin_vals = _paths_from_stdin_lines()
+        if stdin_vals: candidates.append((stdin_vals, "stdin"))
+        
+    # 3. clipboard
+    if clipboard:
+        clip_vals = paths_from_clipboard()
+        if clip_vals: candidates.append((clip_vals, "clipboard"))
+        
+    # 4. constant (filter for existence immediately)
+    const_vals = [v for v in _flatten_paths(constant) if Path(_to_path(v)).exists()]
+    if const_vals: candidates.append((const_vals, "constant"))
+    
+    # 5. cwd
+    if fallback_to_cwd:
+        candidates.append(([Path.cwd().resolve()], "cwd"))
+
+    # Resolve the first successful candidate
+    if not candidates:
+        # Return empty instead of raising ValueError to keep calling code clean
+        return ResolvedPaths(paths=(), origin=None)
+
+    values, origin = candidates[0]
+    paths = tuple(_to_path(v) for v in values)
+    
+    _create_missing_directories(paths, create)
+    return ResolvedPaths(paths=paths, origin=origin)
+```
+
+### Why this is better:
+- **Zero `try...except` needed:** By returning `ResolvedPaths(paths=(), origin=None)`, your main code becomes a simple sequence of assignments.
+- **DRY (Don't Repeat Yourself):** `_create_missing_directories` and the `tuple` conversion happen in **one place** at the end, rather than five different places.
+- **Linear Complexity:** The logic flows in one direction.
+- **Maintainability:** If you want to add a new priority source (e.g., an environment variable), you just add one `if` block to the `candidates` list rather than restructuring the return logic.
+
+### How your main code looks now:
+Because the function no longer crashes, your main block becomes exactly what you wanted: **fast and clean.**
+
+```python
+resolved = resolve_paths(clipboard=True)
+input_text_res = resolve_input_text(args=args, use_clipboard=True)
+input_text = input_text_res.text or ""
+all_files = [Path(f) for f in iter_existing_files(resolved.paths, recursive=True)]
+```

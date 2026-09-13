@@ -1,0 +1,1496 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PathArg • Shared Python Path System</title>
+    <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap');
+        
+        :root {
+            --primary: #3b82f6;
+        }
+        
+        body {
+            font-family: 'Inter', system_ui, sans-serif;
+        }
+        
+        .mono {
+            font-family: 'JetBrains Mono', ui-monospace, monospace;
+        }
+
+        .section-header {
+            font-size: 0.875rem;
+            font-weight: 600;
+            letter-spacing: -.025em;
+            text-transform: uppercase;
+            color: #64748b;
+        }
+
+        .priority-step {
+            transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+
+        .priority-step.active {
+            box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.2);
+            transform: translateY(-1px);
+        }
+
+        .origin-badge {
+            font-size: 0.75rem;
+            padding: 0.125rem 0.625rem;
+            border-radius: 9999px;
+            font-weight: 600;
+        }
+
+        .origin-args { background: #dbeafe; color: #1e40af; }
+        .origin-stdin { background: #e0e7ff; color: #3730a3; }
+        .origin-clipboard { background: #dcfce7; color: #166534; }
+        .origin-constant { background: #fef3c7; color: #854d0e; }
+        .origin-cwd { background: #f3e8ff; color: #6b21a8; }
+
+        .path-pill {
+            background: #f8fafc;
+            border: 1px solid #e2e8f0;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.75rem;
+        }
+
+        .sim-panel {
+            box-shadow: 0 10px 15px -3px rgb(0 0 0 / 0.05), 0 4px 6px -4px rgb(0 0 0 / 0.05);
+        }
+
+        .log-line {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.75rem;
+            padding: 2px 0;
+        }
+
+        .resolution-flow {
+            position: relative;
+        }
+
+        .resolution-flow::before {
+            content: '';
+            position: absolute;
+            left: 1.25rem;
+            top: 2rem;
+            bottom: 1.25rem;
+            width: 2px;
+            background: linear-gradient(to bottom, #bfdbfe, #bae6fd);
+        }
+
+        .nav-active {
+            background: #f1f5f9;
+            color: #0f172a;
+            font-weight: 600;
+        }
+
+        .demo-result {
+            animation: fadeInScale 0.2s ease forwards;
+        }
+
+        @keyframes fadeInScale {
+            from { opacity: 0; transform: translateY(4px) scale(0.98); }
+            to { opacity: 1; transform: translateY(0) scale(1); }
+        }
+
+        .file-tree {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.75rem;
+        }
+
+        .python-code {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.75rem;
+            line-height: 1.4;
+        }
+
+        .input-label {
+            font-size: 0.75rem;
+            font-weight: 600;
+            color: #475569;
+        }
+    </style>
+</head>
+<body class="bg-slate-50">
+    <!-- Header -->
+    <div class="border-b bg-white">
+        <div class="max-w-screen-xl mx-auto px-6 py-5">
+            <div class="flex items-center justify-between">
+                <div class="flex items-center gap-x-3">
+                    <div class="w-10 h-10 bg-blue-600 rounded-2xl flex items-center justify-center shadow-inner">
+                        <i class="fa-solid fa-terminal text-white text-xl"></i>
+                    </div>
+                    <div>
+                        <h1 class="text-2xl font-semibold tracking-tight text-slate-900">PathArg</h1>
+                        <p class="text-xs text-slate-500 -mt-0.5">Shared Python Path Argument System - path_args</p>
+                    </div>
+                </div>
+                <div class="flex items-center gap-x-2 text-sm">
+                    <div class="px-3 py-1.5 bg-slate-100 rounded-2xl flex items-center gap-x-2 text-slate-600">
+                        <i class="fa-solid fa-link text-xs"></i>
+                        <span class="font-medium">1. args → 2. stdin → 3. clipboard → 4. constant → 5. cwd</span>
+                    </div>
+                    <button onclick="resetAll()" 
+                            class="px-3 py-1.5 text-xs font-semibold bg-white border border-slate-200 hover:bg-slate-50 rounded-2xl flex items-center gap-x-1.5 transition-colors">
+                        <i class="fa-solid fa-undo text-xs"></i>
+                        <span>Reset</span>
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="max-w-screen-xl mx-auto px-6 py-6">
+        
+        <!-- Priority Chain -->
+        <div class="mb-8">
+            <div class="flex items-center gap-x-2 mb-3 px-1">
+                <span class="section-header">Resolution Priority</span>
+                <div class="flex-1 h-px bg-slate-200"></div>
+            </div>
+            
+            <div class="grid grid-cols-5 gap-2" id="priority-chain">
+                <!-- Populated by JS -->
+            </div>
+        </div>
+
+        <div class="grid grid-cols-1 lg:grid-cols-12 gap-6">
+            
+            <!-- SIMULATOR -->
+            <div class="lg:col-span-7">
+                <div class="flex items-center justify-between mb-3 px-1">
+                    <span class="section-header">Interactive Simulator</span>
+                    <div class="flex items-center gap-x-1 text-xs">
+                        <div class="flex bg-white border border-slate-200 rounded-2xl p-0.5 text-xs">
+                            <button onclick="switchMode('reader')" id="mode-reader"
+                                    class="px-3 py-1 rounded-[14px] flex items-center gap-x-1.5 text-xs font-semibold nav-active">
+                                <i class="fa-solid fa-copy"></i>
+                                <span>Reader</span>
+                            </button>
+                            <button onclick="switchMode('writer')" id="mode-writer"
+                                    class="px-3 py-1 rounded-[14px] flex items-center gap-x-1.5 text-xs font-semibold text-slate-600 hover:text-slate-800">
+                                <i class="fa-solid fa-file-export"></i>
+                                <span>Writer</span>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Reader Panel -->
+                <div id="panel-reader" class="sim-panel bg-white border border-slate-200 rounded-3xl p-5 mb-6">
+                    <div class="flex items-center justify-between mb-4">
+                        <div>
+                            <div class="flex items-center gap-x-2">
+                                <i class="fa-solid fa-copy text-blue-600"></i>
+                                <span class="font-semibold text-slate-800">copy_concat.py</span>
+                            </div>
+                            <span class="text-xs text-slate-500">Reader command • concatenates files → clipboard / stdout</span>
+                        </div>
+                        <div class="text-right">
+                            <div class="text-[10px] px-2 py-0.5 bg-blue-100 text-blue-700 font-medium rounded-xl inline-block">READER</div>
+                        </div>
+                    </div>
+
+                    <div class="space-y-4">
+                        <!-- CLI Arguments -->
+                        <div>
+                            <div class="flex items-center gap-2 mb-1.5">
+                                <div class="input-label flex items-center gap-x-1">
+                                    <i class="fa-solid fa-terminal w-3"></i>
+                                    <span>1. CLI Arguments</span>
+                                </div>
+                                <button onclick="addArgInput('reader')" class="text-blue-500 hover:text-blue-600 text-xs px-2 py-px rounded hover:bg-blue-50 transition-colors">
+                                    <i class="fa-solid fa-plus"></i> add
+                                </button>
+                            </div>
+                            <div id="reader-args" class="space-y-1.5"></div>
+                        </div>
+
+                        <!-- stdin -->
+                        <div>
+                            <div class="flex items-center justify-between mb-1.5">
+                                <div class="input-label flex items-center gap-x-1">
+                                    <i class="fa-solid fa-arrow-down w-3"></i>
+                                    <span>2. stdin (paths or text)</span>
+                                </div>
+                                <div class="flex items-center gap-x-2 text-xs">
+                                    <label class="flex items-center gap-x-1 cursor-pointer">
+                                        <input type="radio" name="reader-stdin-mode" value="paths" checked onchange="updateStdinMode('reader')" class="accent-blue-600">
+                                        <span class="text-xs">paths</span>
+                                    </label>
+                                    <label class="flex items-center gap-x-1 cursor-pointer">
+                                        <input type="radio" name="reader-stdin-mode" value="content" onchange="updateStdinMode('reader')" class="accent-blue-600">
+                                        <span class="text-xs">content</span>
+                                    </label>
+                                </div>
+                            </div>
+                            <textarea id="reader-stdin" rows="2" placeholder="Paste paths (one per line) or content..."
+                                      class="w-full font-mono text-xs p-2.5 border border-slate-200 rounded-2xl focus:outline-none focus:border-blue-300 resize-y" 
+                                      oninput="updateSimulation()">/tmp/myproject
+src/main.py</textarea>
+                        </div>
+
+                        <!-- Clipboard -->
+                        <div>
+                            <div class="flex items-center justify-between mb-1.5">
+                                <div class="input-label flex items-center gap-x-1">
+                                    <i class="fa-solid fa-clipboard w-3"></i>
+                                    <span>3. Clipboard (paths)</span>
+                                </div>
+                                <button onclick="addClipboardPath('reader')" class="text-emerald-600 hover:text-emerald-700 text-xs px-2 py-px rounded hover:bg-emerald-50 transition-colors">
+                                    <i class="fa-solid fa-plus"></i>
+                                </button>
+                            </div>
+                            <div id="reader-clipboard" class="min-h-[32px] flex flex-wrap gap-1.5 p-2 bg-slate-50 border border-slate-200 rounded-2xl"></div>
+                        </div>
+
+                        <!-- Constant -->
+                        <div class="grid grid-cols-2 gap-3">
+                            <div>
+                                <div class="input-label mb-1.5 flex items-center gap-x-1">
+                                    <i class="fa-solid fa-file-code w-3"></i>
+                                    <span>4. Hardcoded Constant</span>
+                                </div>
+                                <input type="text" id="reader-constant" value="" placeholder="DEFAULT_SOURCE = ''"
+                                       class="w-full font-mono text-xs p-2 border border-slate-200 rounded-2xl focus:outline-none focus:border-blue-300"
+                                       oninput="updateSimulation()">
+                            </div>
+                            <div>
+                                <div class="input-label mb-1.5 flex items-center gap-x-1">
+                                    <i class="fa-solid fa-folder w-3"></i>
+                                    <span>5. Current Working Dir</span>
+                                </div>
+                                <input type="text" id="reader-cwd" value="/Users/dev/project" 
+                                       class="w-full font-mono text-xs p-2 border border-slate-200 rounded-2xl focus:outline-none focus:border-blue-300"
+                                       oninput="updateSimulation()">
+                            </div>
+                        </div>
+
+                        <div class="flex items-center justify-between pt-1">
+                            <button onclick="runSimulation('reader')" 
+                                    class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold rounded-2xl flex items-center gap-x-2 transition-colors shadow-sm">
+                                <i class="fa-solid fa-play"></i>
+                                <span>Resolve &amp; Run</span>
+                            </button>
+                            
+                            <div class="flex items-center gap-x-1 text-xs">
+                                <label class="flex items-center cursor-pointer gap-1.5 text-slate-600">
+                                    <input type="checkbox" id="reader-recursive" checked class="accent-blue-600 w-3.5 h-3.5">
+                                    <span class="text-xs">recursive</span>
+                                </label>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Writer Panel -->
+                <div id="panel-writer" class="sim-panel bg-white border border-slate-200 rounded-3xl p-5 hidden">
+                    <div class="flex items-center justify-between mb-4">
+                        <div>
+                            <div class="flex items-center gap-x-2">
+                                <i class="fa-solid fa-file-export text-emerald-600"></i>
+                                <span class="font-semibold text-slate-800">write_text_file.py</span>
+                            </div>
+                            <span class="text-xs text-slate-500">Writer command • writes text to file or stdout</span>
+                        </div>
+                        <div class="text-right">
+                            <div class="text-[10px] px-2 py-0.5 bg-emerald-100 text-emerald-700 font-medium rounded-xl inline-block">WRITER</div>
+                        </div>
+                    </div>
+
+                    <div class="space-y-4">
+                        <!-- CLI Arguments -->
+                        <div>
+                            <div class="flex items-center gap-2 mb-1.5">
+                                <div class="input-label flex items-center gap-x-1">
+                                    <i class="fa-solid fa-terminal w-3"></i>
+                                    <span>1. CLI Arguments</span>
+                                </div>
+                                <button onclick="addArgInput('writer')" class="text-emerald-500 hover:text-emerald-600 text-xs px-2 py-px rounded hover:bg-emerald-50 transition-colors">
+                                    <i class="fa-solid fa-plus"></i> add
+                                </button>
+                            </div>
+                            <div id="writer-args" class="space-y-1.5"></div>
+                            <div class="mt-1.5 flex items-center gap-2">
+                                <label class="flex items-center gap-x-1.5 text-xs bg-emerald-50 text-emerald-700 px-3 h-7 rounded-2xl border border-emerald-200 cursor-pointer">
+                                    <input type="checkbox" id="writer-stdout-flag" onchange="updateSimulation()" class="accent-emerald-600">
+                                    <span class="font-medium">Enable stdout: <span class="font-mono">--stdout</span></span>
+                                </label>
+                            </div>
+                        </div>
+
+                        <!-- stdin -->
+                        <div>
+                            <div class="flex items-center justify-between mb-1.5">
+                                <div class="input-label flex items-center gap-x-1">
+                                    <i class="fa-solid fa-arrow-down w-3"></i>
+                                    <span>2. stdin (paths or content)</span>
+                                </div>
+                                <div class="flex items-center gap-x-2 text-xs">
+                                    <label class="flex items-center gap-x-1 cursor-pointer">
+                                        <input type="radio" name="writer-stdin-mode" value="paths" checked onchange="updateStdinMode('writer')" class="accent-emerald-600">
+                                        <span class="text-xs">paths</span>
+                                    </label>
+                                    <label class="flex items-center gap-x-1 cursor-pointer">
+                                        <input type="radio" name="writer-stdin-mode" value="content" onchange="updateStdinMode('writer')" class="accent-emerald-600">
+                                        <span class="text-xs">content</span>
+                                    </label>
+                                </div>
+                            </div>
+                            <textarea id="writer-stdin" rows="2" placeholder="Paste destination path(s) or content text..."
+                                      class="w-full font-mono text-xs p-2.5 border border-slate-200 rounded-2xl focus:outline-none focus:border-emerald-300 resize-y" 
+                                      oninput="updateSimulation()">output/translated.md</textarea>
+                        </div>
+
+                        <!-- Clipboard -->
+                        <div>
+                            <div class="flex items-center justify-between mb-1.5">
+                                <div class="input-label flex items-center gap-x-1">
+                                    <i class="fa-solid fa-clipboard w-3"></i>
+                                    <span>3. Clipboard (paths)</span>
+                                </div>
+                                <button onclick="addClipboardPath('writer')" class="text-emerald-600 hover:text-emerald-700 text-xs px-2 py-px rounded hover:bg-emerald-50 transition-colors">
+                                    <i class="fa-solid fa-plus"></i>
+                                </button>
+                            </div>
+                            <div id="writer-clipboard" class="min-h-[32px] flex flex-wrap gap-1.5 p-2 bg-slate-50 border border-slate-200 rounded-2xl"></div>
+                        </div>
+
+                        <div class="grid grid-cols-2 gap-3">
+                            <!-- Constant -->
+                            <div>
+                                <div class="input-label mb-1.5 flex items-center gap-x-1">
+                                    <i class="fa-solid fa-file-code w-3"></i>
+                                    <span>4. Hardcoded Constant</span>
+                                </div>
+                                <input type="text" id="writer-constant" value="" placeholder="DEFAULT_DESTINATION = ''"
+                                       class="w-full font-mono text-xs p-2 border border-slate-200 rounded-2xl focus:outline-none focus:border-emerald-300"
+                                       oninput="updateSimulation()">
+                            </div>
+                            <div>
+                                <div class="input-label mb-1.5 flex items-center gap-x-1">
+                                    <i class="fa-solid fa-folder w-3"></i>
+                                    <span>5. Current Working Dir</span>
+                                </div>
+                                <input type="text" id="writer-cwd" value="/Users/dev/project" 
+                                       class="w-full font-mono text-xs p-2 border border-slate-200 rounded-2xl focus:outline-none focus:border-emerald-300"
+                                       oninput="updateSimulation()">
+                            </div>
+                        </div>
+
+                        <!-- Writer options -->
+                        <div class="grid grid-cols-3 gap-2">
+                            <div>
+                                <div class="input-label mb-1 text-xs">Filename stem</div>
+                                <input type="text" id="writer-name" value="note" class="w-full text-xs font-mono p-2 border border-slate-200 rounded-2xl" oninput="updateSimulation()">
+                            </div>
+                            <div>
+                                <div class="input-label mb-1 text-xs">Extension</div>
+                                <input type="text" id="writer-ext" value="txt" class="w-full text-xs font-mono p-2 border border-slate-200 rounded-2xl" oninput="updateSimulation()">
+                            </div>
+                            <div>
+                                <div class="input-label mb-1 text-xs">Overwrite</div>
+                                <div class="flex items-center h-9 px-3 text-xs font-medium bg-white border border-slate-200 rounded-2xl">
+                                    <span class="text-emerald-700">OVERWRITE_EXISTING = <span class="font-bold">False</span></span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="flex items-center justify-between pt-1">
+                            <button onclick="runSimulation('writer')" 
+                                    class="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-semibold rounded-2xl flex items-center gap-x-2 transition-colors shadow-sm">
+                                <i class="fa-solid fa-play"></i>
+                                <span>Resolve &amp; Write</span>
+                            </button>
+                            
+                            <div class="text-xs text-slate-500 flex items-center gap-1">
+                                <i class="fa-solid fa-info-circle"></i>
+                                <span>stdout only if --stdout is present</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- RESULTS -->
+            <div class="lg:col-span-5">
+                <div class="flex items-center justify-between mb-3 px-1">
+                    <span class="section-header">Resolution Result</span>
+                </div>
+
+                <div class="bg-white border border-slate-200 rounded-3xl p-5 sim-panel h-full flex flex-col">
+                    <div id="result-empty" class="flex-1 flex items-center justify-center text-center py-6">
+                        <div>
+                            <i class="fa-solid fa-magnifying-glass text-3xl text-slate-300 mb-3"></i>
+                            <div class="text-sm text-slate-400 font-medium">Run simulation to see resolution</div>
+                        </div>
+                    </div>
+
+                    <div id="result-panel" class="hidden flex-1 flex flex-col">
+                        <!-- Dynamic content injected by JS -->
+                        <div class="flex items-center justify-between mb-3">
+                            <div>
+                                <span id="result-origin-badge" class="origin-badge"></span>
+                                <span id="result-command-name" class="font-semibold text-slate-700 text-sm ml-2"></span>
+                            </div>
+                            <div id="result-origin-text" class="text-xs font-medium text-slate-500"></div>
+                        </div>
+
+                        <div class="mb-3">
+                            <div class="text-xs font-semibold text-slate-500 mb-1">RESOLVED PATH(S)</div>
+                            <div id="result-paths" class="flex flex-col gap-y-1"></div>
+                        </div>
+
+                        <div id="result-content-section" class="flex-1">
+                            <!-- Reader content -->
+                            <div id="result-reader-section">
+                                <div class="text-xs font-semibold text-slate-500 mb-1">CONCATENATED TEXT</div>
+                                <div class="bg-slate-900 text-emerald-300 rounded-2xl p-3 font-mono text-xs overflow-auto max-h-[120px]" id="result-text"></div>
+                                <div class="mt-2 text-xs flex items-center gap-x-1">
+                                    <span class="px-2 py-px bg-slate-100 text-slate-600 rounded-xl font-medium" id="result-file-count"></span>
+                                </div>
+                            </div>
+
+                            <!-- Writer content -->
+                            <div id="result-writer-section" class="hidden">
+                                <div class="text-xs font-semibold text-slate-500 mb-1">OUTPUT FILE</div>
+                                <div class="flex items-center bg-slate-100 border border-slate-200 px-3 py-2 rounded-2xl mb-2">
+                                    <div class="flex-1">
+                                        <div id="result-output-file" class="font-mono text-sm text-slate-800 break-all"></div>
+                                    </div>
+                                    <div id="result-overwrite-status" class="text-xs px-2 py-1 rounded-xl bg-white border text-emerald-600 font-medium"></div>
+                                </div>
+
+                                <div class="text-xs font-semibold text-slate-500 mb-1">WRITTEN CONTENT</div>
+                                <div class="bg-slate-900 text-emerald-300 rounded-2xl p-3 font-mono text-xs overflow-auto max-h-[80px]" id="result-written-text"></div>
+
+                                <div id="result-stdout-box" class="hidden mt-3">
+                                    <div class="flex items-center gap-x-1.5 mb-1">
+                                        <div class="text-emerald-700">
+                                            <i class="fa-solid fa-terminal"></i>
+                                        </div>
+                                        <div class="font-semibold text-xs text-emerald-700">STDOUT ENABLED</div>
+                                    </div>
+                                    <div class="bg-emerald-900 text-emerald-200 font-mono rounded-2xl px-3 py-2 text-xs" id="result-stdout-content"></div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="pt-3 mt-auto border-t border-slate-100 text-xs">
+                            <div class="flex items-center justify-between text-slate-500">
+                                <div class="flex items-center gap-x-1">
+                                    <i class="fa-solid fa-history"></i>
+                                    <span id="result-source-label"></span>
+                                </div>
+                                <button onclick="copyResult()" class="flex items-center gap-x-1 hover:text-blue-600 transition-colors">
+                                    <i class="fa-solid fa-copy"></i>
+                                    <span class="font-medium">Copy</span>
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Live Console -->
+            <div class="lg:col-span-12">
+                <div class="flex items-center justify-between mb-2 px-1">
+                    <span class="section-header">Live Console</span>
+                    <button onclick="clearConsole()" class="text-xs px-3 py-1 text-slate-500 hover:text-slate-700 flex items-center gap-x-1">
+                        <i class="fa-solid fa-trash text-xs"></i>
+                        <span class="font-medium">clear</span>
+                    </button>
+                </div>
+                <div id="console" 
+                     class="bg-slate-900 text-emerald-300 font-mono text-xs p-4 rounded-3xl min-h-[92px] max-h-[130px] overflow-auto border border-slate-800">
+                    <div class="text-emerald-600 text-opacity-75">// Ready. Run a simulation to see output.</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Scenario Buttons -->
+        <div class="mt-6">
+            <div class="flex items-center gap-x-2 mb-2 px-1">
+                <span class="section-header text-xs">Quick Scenarios</span>
+            </div>
+            <div class="flex flex-wrap gap-2">
+                <button onclick="loadScenario('reader-arg')" class="px-3 py-1.5 bg-white border border-slate-200 hover:bg-blue-50 text-xs rounded-2xl flex items-center gap-x-2 text-blue-700">
+                    <span class="font-semibold">Reader: arg wins</span>
+                </button>
+                <button onclick="loadScenario('reader-stdin')" class="px-3 py-1.5 bg-white border border-slate-200 hover:bg-blue-50 text-xs rounded-2xl flex items-center gap-x-2 text-blue-700">
+                    <span class="font-semibold">Reader: stdin wins</span>
+                </button>
+                <button onclick="loadScenario('reader-clipboard')" class="px-3 py-1.5 bg-white border border-slate-200 hover:bg-blue-50 text-xs rounded-2xl flex items-center gap-x-2 text-blue-700">
+                    <span class="font-semibold">Reader: clipboard</span>
+                </button>
+                <button onclick="loadScenario('writer-arg-stdout')" class="px-3 py-1.5 bg-white border border-slate-200 hover:bg-emerald-50 text-xs rounded-2xl flex items-center gap-x-2 text-emerald-700">
+                    <span class="font-semibold">Writer: --stdout</span>
+                </button>
+                <button onclick="loadScenario('writer-stdin')" class="px-3 py-1.5 bg-white border border-slate-200 hover:bg-emerald-50 text-xs rounded-2xl flex items-center gap-x-2 text-emerald-700">
+                    <span class="font-semibold">Writer: stdin path</span>
+                </button>
+                <button onclick="loadScenario('writer-constant')" class="px-3 py-1.5 bg-white border border-slate-200 hover:bg-emerald-50 text-xs rounded-2xl flex items-center gap-x-2 text-emerald-700">
+                    <span class="font-semibold">Writer: constant</span>
+                </button>
+                <button onclick="loadScenario('stdin-content')" class="px-3 py-1.5 bg-white border border-slate-200 hover:bg-amber-50 text-xs rounded-2xl flex items-center gap-x-2 text-amber-700">
+                    <span class="font-semibold">Stdin text → writer</span>
+                </button>
+            </div>
+        </div>
+
+        <!-- Implementation Reference -->
+        <div class="mt-8 grid grid-cols-1 lg:grid-cols-2 gap-6">
+            <div>
+                <div class="mb-2 px-1">
+                    <span class="section-header">Python Implementation (Key Logic)</span>
+                </div>
+                <div class="bg-slate-900 text-slate-300 rounded-3xl p-4 text-xs python-code overflow-auto">
+<pre><code>def resolve_paths(args, *, arg_names=..., constant=None, clipboard=True, ...):
+    cli_values = _collect_arg_values(args, arg_names)
+    if cli_values:
+        return ResolvedPaths(paths=..., origin="args")
+
+    # NEW: stdin support (second priority)
+    stdin_values = _read_paths_from_stdin()
+    if stdin_values:
+        return ResolvedPaths(paths=..., origin="stdin")
+
+    if clipboard:
+        clip = paths_from_clipboard()
+        if clip:
+            return ResolvedPaths(paths=..., origin="clipboard")
+
+    const_paths = _flatten_paths(constant)
+    if const_paths and _exists(const_paths):
+        return ResolvedPaths(paths=..., origin="constant")
+
+    return ResolvedPaths(paths=(Path.cwd(),), origin="cwd")</code></pre>
+                </div>
+            </div>
+            
+            <div>
+                <div class="mb-2 px-1">
+                    <span class="section-header">stdin + stdout Handling</span>
+                </div>
+                <div class="bg-white border border-slate-200 rounded-3xl p-4 text-xs">
+                    <div class="space-y-3">
+                        <div>
+                            <div class="font-semibold text-slate-700 mb-1">Text content (for writers):</div>
+                            <div class="text-slate-600 text-xs leading-relaxed">
+                                <span class="font-medium">Priority:</span> <span class="font-mono">--text</span> arg &gt; <span class="font-mono">sys.stdin.read()</span> &gt; clipboard text
+                            </div>
+                        </div>
+                        <div>
+                            <div class="font-semibold text-slate-700 mb-1">Paths (for both readers &amp; writers):</div>
+                            <div class="text-slate-600 text-xs leading-relaxed">
+                                <span class="font-medium">Priority:</span> args &gt; <span class="font-mono">stdin</span> &gt; clipboard &gt; constant &gt; cwd
+                            </div>
+                        </div>
+                        <div>
+                            <div class="font-semibold text-emerald-700 mb-1">Stdout for writers:</div>
+                            <div class="text-xs text-slate-600">
+                                Only when <span class="font-mono bg-emerald-50 px-1 rounded">--stdout</span> (or equivalent) is passed in arguments.<br>
+                                Otherwise always writes to a file using <span class="font-mono">choose_output_file()</span>.
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // ==================== STATE ====================
+        let currentMode = 'reader';
+        let readerArgs = [];
+        let writerArgs = [];
+        let readerClipboard = [];
+        let writerClipboard = [];
+        let lastResult = null;
+
+        // ==================== INIT ====================
+        function init() {
+            renderPriorityChain();
+            initArgInputs();
+            initClipboardContainers();
+            
+            // Default values
+            document.getElementById('reader-stdin').value = '/tmp/myproject\nsrc/main.py';
+            document.getElementById('writer-stdin').value = 'output/translated.md';
+            
+            // Set up live update listeners
+            const liveInputs = ['reader-stdin', 'writer-stdin', 'reader-constant', 'writer-constant', 
+                                'reader-cwd', 'writer-cwd', 'writer-name', 'writer-ext'];
+            liveInputs.forEach(id => {
+                const el = document.getElementById(id);
+                if (el) el.addEventListener('input', updateSimulation);
+            });
+            
+            // Initial demo state
+            setTimeout(() => {
+                loadScenario('reader-arg');
+            }, 220);
+        }
+
+        function renderPriorityChain() {
+            const container = document.getElementById('priority-chain');
+            container.innerHTML = '';
+            
+            const steps = [
+                { label: '1. Arguments', icon: 'fa-terminal', color: 'bg-blue-600', desc: 'CLI args' },
+                { label: '2. stdin', icon: 'fa-arrow-down', color: 'bg-indigo-600', desc: 'sys.stdin.read()' },
+                { label: '3. Clipboard', icon: 'fa-clipboard', color: 'bg-emerald-600', desc: 'OS paths' },
+                { label: '4. Constant', icon: 'fa-file-code', color: 'bg-amber-600', desc: 'Hardcoded' },
+                { label: '5. CWD', icon: 'fa-folder', color: 'bg-violet-600', desc: 'Fallback' }
+            ];
+            
+            steps.forEach((step, i) => {
+                const div = document.createElement('div');
+                div.className = `priority-step flex flex-col items-center px-2 py-2.5 bg-white border border-slate-200 rounded-2xl text-center cursor-pointer`;
+                div.innerHTML = `
+                    <div class="w-8 h-8 ${step.color} text-white rounded-2xl flex items-center justify-center mb-1.5 shadow-sm">
+                        <i class="fa-solid ${step.icon} text-sm"></i>
+                    </div>
+                    <div class="font-bold text-xs text-slate-700 leading-none">${step.label}</div>
+                    <div class="text-[10px] text-slate-500 mt-0.5">${step.desc}</div>
+                `;
+                
+                div.onclick = () => highlightStep(i);
+                container.appendChild(div);
+            });
+        }
+
+        function highlightStep(index) {
+            const steps = document.querySelectorAll('#priority-chain > div');
+            steps.forEach((s, i) => {
+                if (i === index) {
+                    s.classList.add('active', 'border-blue-300');
+                    setTimeout(() => s.classList.remove('active', 'border-blue-300'), 1200);
+                }
+            });
+        }
+
+        function initArgInputs() {
+            // Reader defaults
+            readerArgs = [
+                { name: '--source', value: '' }
+            ];
+            renderArgInputs('reader');
+            
+            // Writer defaults
+            writerArgs = [
+                { name: '--destination', value: '' }
+            ];
+            renderArgInputs('writer');
+        }
+
+        function renderArgInputs(mode) {
+            const container = document.getElementById(`${mode}-args`);
+            container.innerHTML = '';
+            
+            const args = mode === 'reader' ? readerArgs : writerArgs;
+            
+            args.forEach((arg, index) => {
+                const row = document.createElement('div');
+                row.className = 'flex gap-2 items-center';
+                
+                row.innerHTML = `
+                    <input type="text" value="${arg.name}" 
+                           class="flex-1 text-xs font-mono px-3 py-1.5 border border-slate-200 rounded-2xl focus:outline-none focus:border-blue-300"
+                           onchange="updateArg(${index}, 'name', this.value, '${mode}')">
+                    <input type="text" value="${arg.value}" placeholder="value"
+                           class="flex-[2] text-xs font-mono px-3 py-1.5 border border-slate-200 rounded-2xl focus:outline-none focus:border-blue-300"
+                           onchange="updateArg(${index}, 'value', this.value, '${mode}')">
+                    <button onclick="removeArg(${index}, '${mode}')" 
+                            class="w-8 h-8 flex items-center justify-center text-slate-400 hover:text-red-500 transition-colors">
+                        <i class="fa-solid fa-times"></i>
+                    </button>
+                `;
+                container.appendChild(row);
+            });
+            
+            // Add empty row hint
+            if (args.length === 0) {
+                const hint = document.createElement('div');
+                hint.className = 'text-xs text-slate-400 px-2 py-1';
+                hint.innerHTML = `No arguments. <span class="cursor-pointer text-blue-500" onclick="addArgInput('${mode}')">Add one</span>`;
+                container.appendChild(hint);
+            }
+        }
+
+        function updateArg(index, field, value, mode) {
+            const args = mode === 'reader' ? readerArgs : writerArgs;
+            args[index][field] = value;
+            updateSimulation();
+        }
+
+        function addArgInput(mode) {
+            const args = mode === 'reader' ? readerArgs : writerArgs;
+            const defaultName = mode === 'reader' ? '--source' : '--destination';
+            args.push({ name: defaultName, value: '' });
+            renderArgInputs(mode);
+            updateSimulation();
+        }
+
+        function removeArg(index, mode) {
+            const args = mode === 'reader' ? readerArgs : writerArgs;
+            args.splice(index, 1);
+            renderArgInputs(mode);
+            updateSimulation();
+        }
+
+        function initClipboardContainers() {
+            // Reader
+            updateClipboardUI('reader');
+            // Writer
+            updateClipboardUI('writer');
+        }
+
+        function updateClipboardUI(mode) {
+            const container = document.getElementById(`${mode}-clipboard`);
+            container.innerHTML = '';
+            
+            const paths = mode === 'reader' ? readerClipboard : writerClipboard;
+            
+            if (paths.length === 0) {
+                const empty = document.createElement('div');
+                empty.className = 'text-xs text-slate-400 px-1 py-0.5 italic';
+                empty.textContent = 'empty (no paths)';
+                container.appendChild(empty);
+            } else {
+                paths.forEach((path, i) => {
+                    const pill = document.createElement('div');
+                    pill.className = 'path-pill px-2.5 py-0.5 text-xs rounded-[14px] flex items-center gap-x-1.5';
+                    pill.innerHTML = `
+                        <span class="font-medium text-slate-700">${path}</span>
+                        <button class="text-red-400 hover:text-red-500 ml-1" onclick="removeClipboardPath('${mode}', ${i})">
+                            <i class="fa-solid fa-times text-xs"></i>
+                        </button>
+                    `;
+                    container.appendChild(pill);
+                });
+            }
+        }
+
+        function addClipboardPath(mode) {
+            const paths = mode === 'reader' ? readerClipboard : writerClipboard;
+            const defaultPath = mode === 'reader' ? '/Users/dev/copied-project' : '/Users/dev/output-folder';
+            paths.push(defaultPath);
+            updateClipboardUI(mode);
+            updateSimulation();
+        }
+
+        function removeClipboardPath(mode, index) {
+            const paths = mode === 'reader' ? readerClipboard : writerClipboard;
+            paths.splice(index, 1);
+            updateClipboardUI(mode);
+            updateSimulation();
+        }
+
+        function updateStdinMode(mode) {
+            updateSimulation();
+        }
+
+        function getStdinValue(mode) {
+            return document.getElementById(`${mode}-stdin`).value.trim();
+        }
+
+        function getStdinMode(mode) {
+            const radios = document.querySelectorAll(`input[name="${mode}-stdin-mode"]`);
+            for (let r of radios) {
+                if (r.checked) return r.value;
+            }
+            return 'paths';
+        }
+
+        // ==================== CORE LOGIC (mirrors Python) ====================
+        function resolvePathsSimulated(config) {
+            const {
+                args,              // array of {name, value}
+                stdinText,
+                stdinMode,
+                clipboardPaths,
+                constant,
+                cwd,
+                isWriter = false
+            } = config;
+
+            // 1. ARGUMENTS
+            let argPaths = [];
+            for (const arg of args) {
+                if (!arg.value || !arg.value.trim()) continue;
+                const name = arg.name.toLowerCase();
+                if (name.includes('source') || name.includes('src') || name.includes('input') || 
+                    name.includes('dest') || name.includes('output') || name.includes('path') ||
+                    name === '-s' || name === '-d' || name === '-o') {
+                    const vals = arg.value.split(/\s+/).filter(Boolean);
+                    argPaths.push(...vals);
+                }
+            }
+            
+            if (argPaths.length > 0) {
+                return {
+                    paths: argPaths.map(cleanPath),
+                    origin: 'args'
+                };
+            }
+
+            // 2. STDIN (second priority)
+            if (stdinText) {
+                if (stdinMode === 'paths') {
+                    const lines = stdinText.split('\n').map(l => l.trim()).filter(Boolean);
+                    if (lines.length > 0) {
+                        return {
+                            paths: lines.map(cleanPath),
+                            origin: 'stdin'
+                        };
+                    }
+                } else {
+                    // stdin content mode — for paths we treat the first non-empty line as a path
+                    const lines = stdinText.split('\n').map(l => l.trim()).filter(Boolean);
+                    if (lines.length > 0) {
+                        return {
+                            paths: [cleanPath(lines[0])],
+                            origin: 'stdin',
+                            stdinContent: stdinText
+                        };
+                    }
+                }
+            }
+
+            // 3. CLIPBOARD
+            if (clipboardPaths && clipboardPaths.length > 0) {
+                return {
+                    paths: clipboardPaths.map(cleanPath),
+                    origin: 'clipboard'
+                };
+            }
+
+            // 4. CONSTANT
+            if (constant && constant.trim()) {
+                const cpath = cleanPath(constant.trim());
+                // Only use if "exists" — we simulate existence by checking if user gave a non-empty value
+                return {
+                    paths: [cpath],
+                    origin: 'constant'
+                };
+            }
+
+            // 5. CWD
+            const cwdPath = cleanPath(cwd || '/current/working/dir');
+            return {
+                paths: [cwdPath],
+                origin: 'cwd'
+            };
+        }
+
+        function cleanPath(p) {
+            p = p.trim().replace(/^["']|["']$/g, '');
+            if (!p.startsWith('/')) {
+                // make absolute-looking for demo
+                return '/' + p.replace(/^\.\/?/, '');
+            }
+            return p;
+        }
+
+        function getArgValues(args, mode) {
+            return args.map(a => `${a.name} ${a.value}`).filter(v => v.trim()).join(' ');
+        }
+
+        function getArgFlag(args, flag) {
+            return args.some(a => a.name.toLowerCase() === flag.toLowerCase() || 
+                                  a.name.toLowerCase() === flag.replace('--', ''));
+        }
+
+        function simulateFileSystem() {
+            // Fake in-memory file system for demo
+            return {
+                '/tmp/myproject': {
+                    type: 'dir',
+                    files: [
+                        { name: 'main.py', content: 'print("hello from main")' },
+                        { name: 'utils.py', content: 'def helper(): pass' }
+                    ]
+                },
+                '/Users/dev/project': {
+                    type: 'dir',
+                    files: [
+                        { name: 'README.md', content: '# Project' },
+                        { name: 'app.js', content: 'console.log("app")' }
+                    ]
+                },
+                '/Users/dev/copied-project': {
+                    type: 'dir',
+                    files: [
+                        { name: 'index.html', content: '<h1>Hello</h1>' },
+                        { name: 'style.css', content: 'body { color: red; }' }
+                    ]
+                },
+                '/Users/dev/output-folder': {
+                    type: 'dir',
+                    files: []
+                }
+            };
+        }
+
+        function getFilesFromPath(path, recursive = true) {
+            const fs = simulateFileSystem();
+            const normalized = path.replace(/\/$/, '');
+            
+            if (fs[normalized] && fs[normalized].type === 'dir') {
+                return fs[normalized].files.map(f => ({
+                    path: normalized + '/' + f.name,
+                    name: f.name,
+                    content: f.content
+                }));
+            }
+            
+            // Treat as file if it looks like one
+            if (normalized.includes('.')) {
+                return [{
+                    path: normalized,
+                    name: normalized.split('/').pop(),
+                    content: `// Content of ${normalized}`
+                }];
+            }
+            
+            // fallback fake files
+            return [
+                { path: normalized + '/file1.txt', name: 'file1.txt', content: 'Sample content line 1' },
+                { path: normalized + '/file2.txt', name: 'file2.txt', content: 'Sample content line 2' }
+            ];
+        }
+
+        function chooseOutputFile(locationPath, defaultStem, defaultSuffix, overwrite = false) {
+            let base = locationPath;
+            
+            // If it's a directory-like path, append filename
+            if (!base.includes('.') || base.endsWith('/')) {
+                base = base.replace(/\/$/, '') + '/' + defaultStem + '.' + defaultSuffix.replace(/^\./, '');
+            } else if (!base.includes('.')) {
+                base = base + '.' + defaultSuffix.replace(/^\./, '');
+            }
+            
+            // Handle overwrite = false → simulate numbering
+            if (!overwrite) {
+                // simulate that a file already exists
+                if (Math.random() > 0.65) {
+                    const parts = base.split('.');
+                    const ext = parts.pop();
+                    const stem = parts.join('.');
+                    base = stem + '_001.' + ext;
+                }
+            }
+            
+            return base;
+        }
+
+        // ==================== RUN SIMULATION ====================
+        function runSimulation(mode) {
+            const isWriter = mode === 'writer';
+            
+            const args = isWriter ? writerArgs : readerArgs;
+            const stdinText = getStdinValue(mode);
+            const stdinMode = getStdinMode(mode);
+            const clipboardPaths = isWriter ? writerClipboard : readerClipboard;
+            const constant = document.getElementById(`${mode}-constant`).value;
+            const cwd = document.getElementById(`${mode}-cwd`).value;
+            
+            const config = {
+                args: args,
+                stdinText: stdinText,
+                stdinMode: stdinMode,
+                clipboardPaths: clipboardPaths,
+                constant: constant,
+                cwd: cwd,
+                isWriter: isWriter
+            };
+            
+            const resolution = resolvePathsSimulated(config);
+            
+            // Build result object
+            let result = {
+                mode: mode,
+                origin: resolution.origin,
+                paths: resolution.paths,
+                argsUsed: args,
+                stdinUsed: stdinText,
+                stdinModeUsed: stdinMode,
+                clipboardUsed: clipboardPaths,
+                constantUsed: constant,
+                cwdUsed: cwd,
+                timestamp: new Date()
+            };
+            
+            let logLines = [];
+            logLines.push(`$ python ${isWriter ? 'write_text_file.py' : 'copy_concat.py'} ${getArgValues(args, mode)}`);
+            
+            if (stdinText) {
+                logLines.push(`[stdin] received ${stdinText.length} chars`);
+            }
+            
+            // Simulate content handling
+            let contentForWriter = '';
+            
+            if (isWriter) {
+                // Determine text content priority: --text arg > stdin > clipboard
+                let textFromArg = '';
+                for (let a of args) {
+                    if (a.name.toLowerCase().includes('text') && a.value) {
+                        textFromArg = a.value;
+                        break;
+                    }
+                }
+                
+                if (textFromArg) {
+                    contentForWriter = textFromArg;
+                    logLines.push(`[text] from --text argument`);
+                } else if (stdinText && stdinMode === 'content') {
+                    contentForWriter = stdinText;
+                    logLines.push(`[text] from stdin (priority 2)`);
+                } else {
+                    contentForWriter = "Hello from the clipboard or default content.\nThis is a demonstration.";
+                    logLines.push(`[text] using fallback content`);
+                }
+                
+                // Check for stdout flag
+                const stdoutEnabled = document.getElementById('writer-stdout-flag').checked || 
+                                      args.some(a => a.name.toLowerCase() === '--stdout' || a.name === '-o' && a.value.includes('stdout'));
+                
+                result.stdoutEnabled = stdoutEnabled;
+                result.content = contentForWriter;
+                
+                // Resolve destination
+                const destPath = resolution.paths[0] || cwd;
+                const stem = document.getElementById('writer-name').value || 'note';
+                const ext = document.getElementById('writer-ext').value || 'txt';
+                
+                const outputFile = chooseOutputFile(destPath, stem, ext, false);
+                result.outputFile = outputFile;
+                result.outputPath = destPath;
+                
+                if (stdoutEnabled) {
+                    logLines.push(`[stdout] --stdout flag detected — skipping file write`);
+                    logLines.push(`[stdout] writing to stdout instead`);
+                } else {
+                    logLines.push(`[write] created ${outputFile}`);
+                    logLines.push(`[write] origin=${resolution.origin}`);
+                }
+                
+            } else {
+                // READER
+                const recursive = document.getElementById('reader-recursive').checked;
+                
+                let allFiles = [];
+                resolution.paths.forEach(p => {
+                    const files = getFilesFromPath(p, recursive);
+                    allFiles.push(...files);
+                });
+                
+                result.files = allFiles;
+                
+                // Build concatenated text
+                let concat = '';
+                allFiles.forEach(f => {
+                    concat += `===== ${f.name} =====\n${f.content}\n\n`;
+                });
+                
+                result.text = concat.trim() || 'No readable files found.';
+                result.fileCount = allFiles.length;
+                
+                logLines.push(`[reader] resolved from ${resolution.origin}`);
+                logLines.push(`[reader] ${allFiles.length} file(s) collected`);
+                logLines.push(`[copy] copied ${result.text.length} chars to clipboard`);
+            }
+            
+            // Render result
+            lastResult = result;
+            renderResult(result);
+            
+            // Print to console
+            appendToConsole(logLines.join('\n'), true);
+            
+            // Bonus: show priority highlight
+            highlightActiveOrigin(resolution.origin);
+        }
+
+        function highlightActiveOrigin(origin) {
+            const steps = document.querySelectorAll('#priority-chain > div');
+            const map = { 'args': 0, 'stdin': 1, 'clipboard': 2, 'constant': 3, 'cwd': 4 };
+            const idx = map[origin] ?? 0;
+            
+            steps.forEach((el, i) => {
+                el.classList.remove('active', 'border-blue-300');
+                if (i === idx) {
+                    el.classList.add('ring-2', 'ring-offset-2', 'ring-blue-300');
+                    setTimeout(() => {
+                        el.classList.remove('ring-2', 'ring-offset-2', 'ring-blue-300');
+                    }, 1300);
+                }
+            });
+        }
+
+        function renderResult(result) {
+            document.getElementById('result-empty').classList.add('hidden');
+            const panel = document.getElementById('result-panel');
+            panel.classList.remove('hidden');
+            
+            // Header
+            document.getElementById('result-command-name').textContent = result.mode === 'reader' ? 'copy_concat.py' : 'write_text_file.py';
+            
+            const badge = document.getElementById('result-origin-badge');
+            badge.className = `origin-badge origin-${result.origin}`;
+            badge.textContent = result.origin.toUpperCase();
+            
+            document.getElementById('result-origin-text').innerHTML = `<span class="font-mono">${result.origin}</span>`;
+            
+            // Paths
+            const pathsContainer = document.getElementById('result-paths');
+            pathsContainer.innerHTML = '';
+            
+            result.paths.forEach(p => {
+                const pill = document.createElement('div');
+                pill.className = 'path-pill px-3 py-1 text-xs flex items-center gap-x-2';
+                pill.innerHTML = `
+                    <i class="fa-solid fa-folder text-amber-500"></i>
+                    <span class="font-medium flex-1 truncate">${p}</span>
+                `;
+                pathsContainer.appendChild(pill);
+            });
+            
+            // Reader-specific
+            const readerSection = document.getElementById('result-reader-section');
+            const writerSection = document.getElementById('result-writer-section');
+            
+            if (result.mode === 'reader') {
+                readerSection.style.display = 'block';
+                writerSection.classList.add('hidden');
+                
+                document.getElementById('result-text').innerHTML = 
+                    (result.text || '').replace(/\n/g, '<br>');
+                document.getElementById('result-file-count').innerHTML = 
+                    `${result.fileCount || 0} file(s) • ${result.text ? result.text.length : 0} chars`;
+                
+                document.getElementById('result-source-label').innerHTML = `from ${result.origin}`;
+            } else {
+                readerSection.style.display = 'none';
+                writerSection.classList.remove('hidden');
+                
+                document.getElementById('result-output-file').textContent = result.outputFile || 'N/A';
+                
+                const statusEl = document.getElementById('result-overwrite-status');
+                statusEl.textContent = 'OVERWRITE=FALSE';
+                
+                document.getElementById('result-written-text').innerHTML = 
+                    (result.content || '').replace(/\n/g, '<br>');
+                
+                const stdoutBox = document.getElementById('result-stdout-box');
+                const stdoutContent = document.getElementById('result-stdout-content');
+                
+                if (result.stdoutEnabled) {
+                    stdoutBox.classList.remove('hidden');
+                    stdoutContent.textContent = result.content || '(no content)';
+                    document.getElementById('result-source-label').innerHTML = `stdout (flag enabled)`;
+                } else {
+                    stdoutBox.classList.add('hidden');
+                    document.getElementById('result-source-label').innerHTML = `file written • from ${result.origin}`;
+                }
+            }
+        }
+
+        function updateSimulation() {
+            // Live preview of origin only
+            if (!lastResult) return;
+            
+            // Optional: could update live indicator here
+        }
+
+        // ==================== CONSOLE ====================
+        function appendToConsole(text, replace = false) {
+            const consoleEl = document.getElementById('console');
+            
+            if (replace) {
+                consoleEl.innerHTML = '';
+            }
+            
+            const lines = text.split('\n');
+            lines.forEach(line => {
+                const div = document.createElement('div');
+                div.className = 'log-line text-emerald-300';
+                div.textContent = line;
+                consoleEl.appendChild(div);
+            });
+            
+            consoleEl.scrollTop = consoleEl.scrollHeight;
+        }
+        
+        function clearConsole() {
+            document.getElementById('console').innerHTML = 
+                '<div class="text-emerald-600 text-opacity-75">// Console cleared.</div>';
+        }
+
+        function copyResult() {
+            if (!lastResult) return;
+            
+            let text = '';
+            if (lastResult.mode === 'reader') {
+                text = lastResult.text;
+            } else {
+                text = lastResult.content || '';
+                if (lastResult.stdoutEnabled) {
+                    text = '=== STDOUT ===\n' + text;
+                } else {
+                    text = '=== FILE: ' + lastResult.outputFile + ' ===\n' + text;
+                }
+            }
+            
+            navigator.clipboard.writeText(text).then(() => {
+                const originalText = event.currentTarget ? event.currentTarget.innerHTML : '';
+                const btns = document.querySelectorAll('#result-panel button');
+                if (btns.length > 0) {
+                    const btn = btns[0];
+                    const orig = btn.innerHTML;
+                    btn.innerHTML = '<i class="fa-solid fa-check"></i> Copied';
+                    setTimeout(() => btn.innerHTML = orig, 1400);
+                } else {
+                    // fallback toast
+                    const toast = document.createElement('div');
+                    toast.className = 'fixed bottom-4 right-4 bg-slate-800 text-white text-xs px-4 py-2 rounded-2xl shadow-lg flex items-center gap-x-2';
+                    toast.innerHTML = `<i class="fa-solid fa-check"></i> <span>Copied to clipboard</span>`;
+                    document.body.appendChild(toast);
+                    setTimeout(() => toast.remove(), 1500);
+                }
+            }).catch(() => {
+                prompt("Copy this content:", text);
+            });
+        }
+
+        // ==================== SCENARIOS ====================
+        function loadScenario(name) {
+            // Reset state
+            document.getElementById('result-panel').classList.add('hidden');
+            document.getElementById('result-empty').classList.remove('hidden');
+            
+            if (name.startsWith('reader')) {
+                switchMode('reader');
+            } else {
+                switchMode('writer');
+            }
+            
+            // Clear previous
+            readerArgs = [];
+            writerArgs = [];
+            readerClipboard = [];
+            writerClipboard = [];
+            
+            const readerStdin = document.getElementById('reader-stdin');
+            const writerStdin = document.getElementById('writer-stdin');
+            
+            if (name === 'reader-arg') {
+                readerArgs = [
+                    { name: '--source', value: '/tmp/myproject' }
+                ];
+                readerStdin.value = '';
+                readerClipboard = ['/Users/dev/copied-project'];
+                document.getElementById('reader-constant').value = '/Users/dev/project';
+                document.getElementById('reader-cwd').value = '/Users/dev/project';
+                
+            } else if (name === 'reader-stdin') {
+                readerArgs = [];
+                readerStdin.value = '/Users/dev/copied-project\nsrc/utils.py';
+                document.getElementById('reader-constant').value = '/Users/dev/project';
+                document.getElementById('reader-cwd').value = '/Users/dev/project';
+                // set stdin mode to paths
+                document.querySelector('input[name="reader-stdin-mode"][value="paths"]').checked = true;
+                
+            } else if (name === 'reader-clipboard') {
+                readerArgs = [];
+                readerStdin.value = '';
+                readerClipboard = ['/Users/dev/copied-project'];
+                document.getElementById('reader-constant').value = '';
+                document.getElementById('reader-cwd').value = '/Users/dev/project';
+                
+            } else if (name === 'writer-arg-stdout') {
+                writerArgs = [
+                    { name: '--destination', value: '/tmp/output' },
+                    { name: '--stdout', value: '' }
+                ];
+                writerStdin.value = 'Some fallback content here';
+                document.getElementById('writer-constant').value = '';
+                document.getElementById('writer-cwd').value = '/Users/dev/project';
+                document.getElementById('writer-name').value = 'report';
+                document.getElementById('writer-ext').value = 'md';
+                document.getElementById('writer-stdout-flag').checked = true;
+                
+            } else if (name === 'writer-stdin') {
+                writerArgs = [];
+                writerStdin.value = '/Users/dev/output-folder\nreport.txt';
+                document.querySelector('input[name="writer-stdin-mode"][value="paths"]').checked = true;
+                document.getElementById('writer-constant').value = '';
+                document.getElementById('writer-cwd').value = '/Users/dev/project';
+                document.getElementById('writer-name').value = 'translated';
+                document.getElementById('writer-ext').value = 'md';
+                document.getElementById('writer-stdout-flag').checked = false;
+                
+            } else if (name === 'writer-constant') {
+                writerArgs = [];
+                writerStdin.value = '';
+                writerClipboard = [];
+                document.getElementById('writer-constant').value = '/Users/dev/output-folder';
+                document.getElementById('writer-cwd').value = '/Users/dev/project';
+                document.getElementById('writer-name').value = 'from-const';
+                document.getElementById('writer-ext').value = 'txt';
+                
+            } else if (name === 'stdin-content') {
+                switchMode('writer');
+                writerArgs = [];
+                writerStdin.value = 'This text was piped through stdin.\nIt will be written to the resolved destination.';
+                document.querySelector('input[name="writer-stdin-mode"][value="content"]').checked = true;
+                document.getElementById('writer-constant').value = '';
+                document.getElementById('writer-cwd').value = '/tmp';
+                document.getElementById('writer-name').value = 'stdin-note';
+                document.getElementById('writer-ext').value = 'txt';
+                document.getElementById('writer-stdout-flag').checked = false;
+            }
+            
+            // Render updated UI
+            renderArgInputs('reader');
+            renderArgInputs('writer');
+            updateClipboardUI('reader');
+            updateClipboardUI('writer');
+            
+            // Run automatically
+            setTimeout(() => {
+                runSimulation(currentMode);
+            }, 40);
+        }
+
+        function switchMode(mode) {
+            currentMode = mode;
+            
+            const readerPanel = document.getElementById('panel-reader');
+            const writerPanel = document.getElementById('panel-writer');
+            const readerBtn = document.getElementById('mode-reader');
+            const writerBtn = document.getElementById('mode-writer');
+            
+            if (mode === 'reader') {
+                readerPanel.classList.remove('hidden');
+                writerPanel.classList.add('hidden');
+                readerBtn.classList.add('nav-active');
+                writerBtn.classList.remove('nav-active');
+            } else {
+                readerPanel.classList.add('hidden');
+                writerPanel.classList.remove('hidden');
+                readerBtn.classList.remove('nav-active');
+                writerBtn.classList.add('nav-active');
+            }
+            
+            // Hide previous result
+            document.getElementById('result-panel').classList.add('hidden');
+            document.getElementById('result-empty').classList.remove('hidden');
+        }
+
+        function updateArgInputListeners() {
+            // Handled by renderArgInputs
+        }
+
+        function resetAll() {
+            // Clear everything
+            readerArgs = [{ name: '--source', value: '' }];
+            writerArgs = [{ name: '--destination', value: '' }];
+            readerClipboard = [];
+            writerClipboard = [];
+            
+            document.getElementById('reader-stdin').value = '/tmp/myproject';
+            document.getElementById('writer-stdin').value = 'output/translated.md';
+            
+            document.getElementById('reader-constant').value = '';
+            document.getElementById('writer-constant').value = '';
+            
+            document.getElementById('reader-cwd').value = '/Users/dev/project';
+            document.getElementById('writer-cwd').value = '/Users/dev/project';
+            
+            document.getElementById('writer-name').value = 'note';
+            document.getElementById('writer-ext').value = 'txt';
+            document.getElementById('writer-stdout-flag').checked = false;
+            
+            document.querySelector('input[name="reader-stdin-mode"][value="paths"]').checked = true;
+            document.querySelector('input[name="writer-stdin-mode"][value="paths"]').checked = true;
+            
+            renderArgInputs('reader');
+            renderArgInputs('writer');
+            updateClipboardUI('reader');
+            updateClipboardUI('writer');
+            
+            // Clear result
+            document.getElementById('result-panel').classList.add('hidden');
+            document.getElementById('result-empty').classList.remove('hidden');
+            
+            clearConsole();
+            lastResult = null;
+        }
+
+        // Keyboard shortcuts
+        function setupKeyboard() {
+            document.addEventListener('keydown', function(e) {
+                if (e.metaKey && e.key === "Enter") {
+                    e.preventDefault();
+                    runSimulation(currentMode);
+                }
+                if (e.key === "?" && document.activeElement.tagName === "BODY") {
+                    e.preventDefault();
+                    const scenarios = ['reader-arg', 'reader-stdin', 'writer-arg-stdout', 'stdin-content'];
+                    const random = scenarios[Math.floor(Math.random() * scenarios.length)];
+                    loadScenario(random);
+                }
+            });
+            
+            // Show hint
+            setTimeout(() => {
+                const hint = document.createElement('div');
+                hint.style.cssText = 'position:absolute;bottom:12px;right:20px;font-size:10px;opacity:0.4';
+                hint.innerHTML = '⌘⏎ to run • ? for random scenario';
+                // document.body.appendChild(hint); // optional
+            }, 3000);
+        }
+
+        // ==================== BOOTSTRAP ====================
+        function bootstrap() {
+            init();
+            setupKeyboard();
+            
+            // Make some initial clipboard state nice
+            setTimeout(() => {
+                // Seed one clipboard item for fun
+                if (readerClipboard.length === 0) {
+                    // Don't auto-seed to avoid confusion
+                }
+            }, 100);
+            
+            // Demo message in console
+            setTimeout(() => {
+                const c = document.getElementById('console');
+                if (c.innerHTML.includes('Ready')) {
+                    // already good
+                }
+            }, 1000);
+            
+            // Make sure we show a good initial view
+            console.log('%c[PathArg] Single-page simulator ready.', 'color:#64748b');
+        }
+
+        window.onload = bootstrap;
+        
+        // Global helpers for console debugging
+        window.PathArg = {
+            run: (m) => runSimulation(m || 'reader'),
+            load: loadScenario,
+            reset: resetAll
+        };
+    </script>
+</body>
+</html>

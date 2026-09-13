@@ -1,0 +1,37 @@
+
+input = """
+check. in this case it should create 4 files:
+# project
+
+this return 1st file. look for filename.ext in few lines before code, priority by distance so this will create html but not 123.cs
+## index.html
+```html
+<!DOCTYPE html>
+ 
+```
+
+this return 2nd file 1.js
+
+```javascript
+// qwe
+
+```
+
+
+this return 3rd file name is 2 and ext is js, by search filename in 1st line of code
+```
+// 2.js
+
+```
+
+
+this return 4th file, even in case of unfinished code block
+## game.js — Main
+game
+logic
+```javascript
+// game
+
+"""
+
+

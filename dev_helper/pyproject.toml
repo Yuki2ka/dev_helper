@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dev_helper"
+version = "0.1.0"
+description = "Developer helper tools for clipboard-to-file and file concatenation"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.9"
+dependencies = [
+    "pyperclip",
+    "pathspec",
+    "magika",
+    "pyttsx3",
+]
+
+[project.optional-dependencies]
+win = ["pywin32"]
+dnd = ["tkinterdnd2"]
+
+[project.scripts]
+to_clipboard = "to_clipboard.to_clipboard:concatenate_files"
+apply_to_clipboard = "apply.apply_to_clipboard:main"
+new_file_from_clipboard = "new_file.new_file_from_clipboard:main"
+new_file_from_clipboard_lite = "new_file.new_file_from_clipboard_lite:main"
+new_file_from_clipboard_liteB = "new_file.new_file_from_clipboard_liteB:main"
+new_html_from_clipboard = "new_file.new_HTLM_from_clipboard:main"
+new_img = "new_file.new_img:main"
+combine_img = "new_file.combine_img:main"
+new_voice = "new_file.new_voice:main"
+new_file_from_LLM = "new_file.new_file_from_LLM:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["to_clipboard*", "new_file*", "common*", "apply*"]

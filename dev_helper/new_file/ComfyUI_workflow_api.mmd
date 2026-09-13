@@ -1,0 +1,46 @@
+flowchart TD
+    Start([Start]) --> Collect[Collect Inputs\nCLI args → Stdin → Clipboard]
+    Collect --> Categorize{Categorize by Extension}
+
+    Categorize -->|*.txt / raw text| TextPath[Text/Prompt Path]
+    Categorize -->|*.png, *.jpg, etc.| ImgPath[Image Path]
+    Categorize -->|*.safetensors| LoraPath[LoRA Path]
+    Categorize -->|*.json| WfPath[Workflow Path]
+
+    %% Text Logic
+    TextPath --> TCount{Count?}
+    TCount -->|1| TSingle[Use as-is]
+    TCount -->|>1| TMode{MULTIPLE_INPUT setting}
+    TMode -->|"combine" / 1| TCombine[Join with \n\n → Single Prompt]
+    TMode -->|"multi" / 2 | TMulti[One prompt per job]
+
+    %% Image Logic
+    ImgPath --> ICount{Count?}
+    ICount -->|0| INone[txt2img: EmptyLatentImage]
+    ICount -->|1| ISingle[i2i: Wire to LoadImage node]
+    ICount -->|>1| IMode{MULTIPLE_INPUT setting}
+    IMode -->|"combine" / 1| ICombineCheck{Workflow has >1\nLoadImage nodes?}
+    ICombineCheck -->|Yes| IAssign[Map images to each node]
+    ICombineCheck -->|No| IPack[Pack into single grid image]
+    IMode -->|"multi" / 2 | IMulti[One image per job]
+
+    %% LoRA Logic
+    LoraPath --> LCount{Count?}
+    LCount -->|0| LNone[Use original/none]
+    LCount -->|1| LSingle[Inject before existing loader]
+    LCount -->|>1| LMode{MULTIPLE_SAFETENSORS setting}
+    LMode -->|"combine" / 1| LChain[Chain all in single job]
+    LMode -->|"multi" / 2 | LMulti[One LoRA per job]
+
+    %% Workflow Logic
+    WfPath --> WLoad["Load each .json independently\n(Always runs ALL)"]
+
+    %% Job Planning & Output
+    TSingle & TCombine & TMulti & INone & ISingle & IAssign & IPack & IMulti & LNone & LSingle & LChain & LMulti & WLoad --> Plan[Job Planner]
+    Plan --> Matrix{Build Job Matrix}
+    Matrix -->|Images ≤ 1 assignment| Cartesian["Cartesian Product:\nPrompts × LoRA Groups × Image Assignment"]
+    Matrix -->|Images > 1 assignment| Cycle["Cycle Pairs:\nPrompt[i] + Image[i] × LoRA Groups"]
+
+    Cartesian & Cycle --> Queue[Queue to ComfyUI Server]
+    Queue --> Wait[Wait via WebSocket & download]
+    Wait --> Output(["Output: 1 generated image per job\nsaved to output_dir"])

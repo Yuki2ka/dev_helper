@@ -1,0 +1,37 @@
+py script
+get all images in cwd and arrange them 
+do proper resize and produce combined webP
+
+ROWS 2
+#COLS 1
+ARRANGE_ORDER_PRIORITY leftToRight | TOpToDown | FillWthBestSize #or topDown
+SORT_BY DATE | NAME | disable sort
+
+this mean 
+1.png 2.png 3png
+4.png 5.png
+
+#CANVAS_SIZE  If not specified, canvas grows automatically.
+
+limits: images out of limit will be scaled (even if canvas is bigger size), keep aspect ratio
+image_W_max 512
+#image_W_min #any may be set or not. commented or -1 is same as None this mean 'automatic'
+image_H_max  256
+image_H_min  256
+
+
+
+overwrite = true
+
+CELL_PADDING = 2
+
+background	= 255, 255, 255, 0	transparent
+
+format = avif fallback to webp
+	format presets
+	avif	quality=90, max compress
+	webp quality=95, method=6 (max compress)
+	png	9 (max compress)
+	webPll lossless
+
+use pathlib to clean code. path = Path('data') / 'folder' / 'qwe.txt'
