@@ -33,7 +33,8 @@ new_img = "new_file.new_img:main"
 combine_img = "new_file.combine_img:main"
 new_voice = "new_file.new_voice:main"
 new_file_from_LLM = "new_file.new_file_from_LLM:main"
+open_file_via_http = "view.open_file_via_http:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["to_clipboard*", "new_file*", "common*", "apply*"]
+include = ["to_clipboard*", "new_file*", "common*", "apply*", "view*"]

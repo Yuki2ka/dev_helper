@@ -41,6 +41,7 @@ So by default it will create files in folder where you put the script.
 | `signature_from_crate.py` | list with newline separators like <br>blake3/hash<br>crossbeam<br> will copy to clipboard list of signatures blake3/hash, then all from crossbeam. use signature_extractor_from_crate.py for input name-> output list|
 | `check_hash.py` | Check file integrity via MD5 hashes; create/update .md5 sidecar files for verification. |
 | `to_clipboard_ascii_path_tree.py` | copy only paths file tree without content. This also demonstrate how build create copies with diferent parameters without code duplication in source. |
+| `open_file_via_http.py` | You copy a file (or folder, or a link to one) and run the script: it serves the file's parent folder over local HTTP (with COOP/COEP + no-cache headers) and opens it in your default browser. Reuses the already-running server for the same (or a nested) folder; a different folder automatically gets its own free port, so a forgotten server in another terminal keeps working untouched. |
 
 All scripts should use exactly same `command_paths.py` to get and resolve file lists as all others in this project.
 

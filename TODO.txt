@@ -1,18 +1,18 @@
 
-## implement new script
-open_file_via_http.py
+## DONE: implement new script
+open_file_via_http.py  (dev_helper/view/open_file_via_http.py)
 start server, open file using default browser
 	self.send_header("Cross-Origin-Opener-Policy", "same-origin")
 	self.send_header("Cross-Origin-Embedder-Policy", "require-corp")
 	self.send_header("Cache-Control", "no-store")
-ensure new port for new dir and if possible reuse for same dir as already running server
-use case:
-user  has file or link to file in clipboard
-he click scrips
-and server start in parent folder for that file and show it in browser
-use case2:
-user forgot close this terminal session and copy another file from different folder and run script - it should properly start server and show new file in new folder.
-if this difficult or not possible - may be possible finish previous server or inform user - think what is better without too heavy libraries
+Implemented: a small JSON registry in the OS temp dir tracks dir -> {port, pid}
+for live servers. Same dir (or a sub-folder of an already-served dir) reuses the
+running server (no new process); a different dir always gets a fresh
+OS-assigned free port, so a forgotten server from another terminal is left
+running untouched. Dead entries (closed terminal / crashed process) are
+detected via port+pid liveness checks and dropped automatically. No extra
+dependencies - stdlib http.server/socketserver only. Also works when the
+clipboard/arg points at a folder.
 
 ##
 loseless
