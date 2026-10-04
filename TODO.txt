@@ -1,3 +1,45 @@
+
+## implement new script
+open_file_via_http.py
+start server, open file using default browser
+	self.send_header("Cross-Origin-Opener-Policy", "same-origin")
+	self.send_header("Cross-Origin-Embedder-Policy", "require-corp")
+	self.send_header("Cache-Control", "no-store")
+ensure new port for new dir and if possible reuse for same dir as already running server
+use case:
+user  has file or link to file in clipboard
+he click scrips
+and server start in parent folder for that file and show it in browser
+use case2:
+user forgot close this terminal session and copy another file from different folder and run script - it should properly start server and show new file in new folder.
+if this difficult or not possible - may be possible finish previous server or inform user - think what is better without too heavy libraries
+
+##
+loseless
+ img combine
+
+##
+
+combine_img.py and other
+check is it rewrite output without ask. should timestamp if same exist
+
+# deferred
+
+## implement new script to new_screenshot_HDR_from_video.py
+input clipboard with video file
+ask for frame number or time. parse time in hh:mm:ss h.mm or other similar formats with ":. -" separators. by default frame 0.
+
+ask output image or open gui
+	output gainmap jpg
+	gui py tk
+		video selected frame.
+			buttons: play, pause, +1 frame, +1sec, +1 min, -1 frame, -1sec, -1 min
+			sliders: exposure, maybe some more useful
+			save sdr and gainmap, save combined jpg, save combined avif
+
+
+
+##
 think about BINARY_EXTENSIONS why it need, or better to use SHOW_CONTENT_WHITELIST
 in 2way_explorer.py
 in to_clipboard.py

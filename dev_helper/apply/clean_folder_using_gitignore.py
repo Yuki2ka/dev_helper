@@ -1,0 +1,1 @@
+## read .gitignore and .hgignore and remove files that mutch them. reuse git and gh parsers and properly use command args and menu system same as all other scripts in project. if no .ignore files - print about this. if found files to delete - preview and ask confirm delete. option default = 'ask', 1 or y - yes, other key = no. similar as in other menu in our scripts.

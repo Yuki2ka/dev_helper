@@ -1,0 +1,7 @@
+
+### default key
+
+[*] option A #default it top and any key press select it
+[1] option B #press 1
+[2]
+[3]
