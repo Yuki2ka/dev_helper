@@ -53,6 +53,7 @@ All scripts should use exactly same `command_paths.py` to get and resolve file l
 | `build.py` | Creates self-contained script bundles that you can run .py from any folder. No code duplication in source. And creates `_terminal_scripts_dst_do_not_edit` - examples of commands for case if library installed via pip |
 | `build_more.py` | Settings to build variants of same scripts. |
 | `clean.py` | Remove `__pycache__`, `.pytest_cache`, and standalone folder contents. Run to clean build artifacts. |
+| `install_linux_context_menu.sh` | Linux: add all `new*` scripts to the file-manager right-click menu (Nautilus/Nemo/Caja "Scripts", Dolphin "Actions", Thunar custom actions). Install/update/uninstall; manual how-to in the file header. |
 
 
 

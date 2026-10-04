@@ -18,6 +18,11 @@ import sys
 from PIL import Image, ImageDraw
 from pathlib import Path
 
+# Ensure project root is importable for path_args package
+_resolved = Path(__file__).resolve()
+if len(_resolved.parents) >= 3:
+    sys.path.insert(0, str(_resolved.parents[2]))
+
 from path_args import resolve_paths, choose_output_file
 
 
