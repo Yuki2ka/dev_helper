@@ -92,5 +92,33 @@ class TestNewImg5GreenE2E(unittest.TestCase):
             shutil.rmtree(work, ignore_errors=True)
 
 
+@unittest.skipUnless(
+    (STANDALONE / "apply" / "clean_folder_using_gitignore.py").exists(),
+    "clean_folder_using_gitignore.py not built",
+)
+class TestCleanFolderUsingGitignoreE2E(unittest.TestCase):
+    def test_standalone_cleans_ignored_files(self):
+        with tempfile.TemporaryDirectory() as td:
+            work = Path(td)
+            proj = work / "repo"
+            proj.mkdir()
+            (proj / ".gitignore").write_text("*.tmp\nbuild/\n", encoding="utf-8")
+            (proj / "main.py").write_text("print('hello')", encoding="utf-8")
+            (proj / "temp.tmp").write_text("trash", encoding="utf-8")
+            build_dir = proj / "build"
+            build_dir.mkdir()
+            (build_dir / "out.o").write_text("binary", encoding="utf-8")
+
+            result, _ = _shallow_run(
+                "apply/clean_folder_using_gitignore.py",
+                ["--no-confirm", "--permanent", str(proj)],
+            )
+            self.assertEqual(result.returncode, 0, result.stderr[:500])
+            self.assertTrue((proj / "main.py").exists())
+            self.assertTrue((proj / ".gitignore").exists())
+            self.assertFalse((proj / "temp.tmp").exists())
+            self.assertFalse(build_dir.exists())
+
+
 if __name__ == "__main__":
     unittest.main()

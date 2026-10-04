@@ -36,6 +36,7 @@ So by default it will create files in folder where you put the script.
 | `new_voice` | Create numbered speech files using text-to-speech (pytttsx3). wav, opus. |
 | `random_password` | Generate a random password and copy it to clipboard. |
 | `apply_LF_ending` | all ending linux type to save size. |
+| `clean_folder_using_gitignore.py` | Clean folder removing files/dirs matching .gitignore and .hgignore. |
 | `signature_extractor.py` | produce most compact signature with types, if types present and necessary. ( build-in to_clipboard.py apply_to_clipboard.py ) |
 | `signature_from_crate.py` | list with newline separators like <br>blake3/hash<br>crossbeam<br> will copy to clipboard list of signatures blake3/hash, then all from crossbeam. use signature_extractor_from_crate.py for input name-> output list|
 | `check_hash.py` | Check file integrity via MD5 hashes; create/update .md5 sidecar files for verification. |

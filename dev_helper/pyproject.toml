@@ -23,6 +23,8 @@ dnd = ["tkinterdnd2"]
 [project.scripts]
 to_clipboard = "to_clipboard.to_clipboard:concatenate_files"
 apply_to_clipboard = "apply.apply_to_clipboard:main"
+clean_folder_using_gitignore = "apply.clean_folder_using_gitignore:main"
+delete_dev_temp_folder_cleaner = "apply.delete_dev_temp_folder_cleaner:main"
 new_file_from_clipboard = "new_file.new_file_from_clipboard:main"
 new_file_from_clipboard_lite = "new_file.new_file_from_clipboard_lite:main"
 new_file_from_clipboard_liteB = "new_file.new_file_from_clipboard_liteB:main"

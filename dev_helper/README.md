@@ -10,6 +10,8 @@ pip install dev_helper[win]
 | Command | Description |
 |---------|-------------|
 | `to_clipboard` | Copy files/folders to clipboard |
+| `clean_folder_using_gitignore` | Clean folder using .gitignore and .hgignore rules |
+| `delete_dev_temp_folder_cleaner` | Clean dev cache and temporary files |
 | `new_file_from_clipboard` | Create files from clipboard (Magika) |
 | `new_file_from_clipboard_lite` | Create files from clipboard (simple detection) |
 | `new_file_from_clipboard_liteB` | Create files from clipboard (strict validation) |
