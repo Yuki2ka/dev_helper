@@ -52,7 +52,7 @@ DEPS_WINDOWS = [
 
 # Image generation / manipulation.
 DEPS_IMAGES = [
-    "Pillow",      # combine_img, new_img, ascii_art_from_input
+    "Pillow",      # combine_img, new_img, new_animated_webP_from_files, ascii_art_from_input
 ]
 
 # Build tooling required to run build.py / build_more.py.

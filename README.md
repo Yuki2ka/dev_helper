@@ -30,6 +30,7 @@ So by default it will create files in folder where you put the script.
 | `new_file_from_clipboard` | You copy whole GLM answer and script will save it as md and also spawn N files with (i hope) proper extensions for ech code block. OR you copy single code block and script save it with proper extension |
 | `new_HTLM_from_clipboard` | You copy text from web page. Script save formatted HTML. Similar to justpaste.it CSS usually lost. |
 | `combine_img` | Combine multiple images into a grid layout e.g. 3 columns, or 1 row or fill best. choose size, auto-size, sort by name or time. |
+| `new_animated_webP_from_files` | Create an animated WebP from image files (copied/selected or passed as args). Frames of existing animated WebP inputs are preserved as-is via `webpmux`; without them Pillow alone is enough. |
 | `new_img` | Create numbered placeholder color images with grid overlay. Useful for UI mockups and testing. |
 | `new_audio` | Generate sine wave audio files, choose req, notes or pentatonic scale quantization. wav, opus. |
 | `new_audio_sweep` | Generate frequency sweep audio files. Can quantize to pentatonic scale. |
@@ -63,7 +64,8 @@ All scripts should use exactly same `command_paths.py` to get and resolve file l
 - Optional: `pywin32` (Windows) - for clipboard operations
 - Optional: `pyperclip` - cross-platform clipboard support
 - Optional: `pathspec` - for .gitignore/.hgignore filtering in to_clipboard
-- Optional: `Pillow` (PIL) - for image operations (combine_img, new_img)
+- Optional: `Pillow` (PIL) - for image operations (combine_img, new_img, new_animated_webP_from_files)
+- Optional: `webpmux` (libwebp binary) - only to preserve frames of animated WebP inputs (new_animated_webP_from_files)
 - Optional: `pytttsx3` - for voice generation (new_voice)
 - Optional: `numpy`, `pydub` - for audio sweep generation (new_audio_sweep)
 

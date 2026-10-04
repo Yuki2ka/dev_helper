@@ -171,7 +171,7 @@ icon_for() {
     case "$1" in
         new_audio*)          echo audio-x-generic ;;
         new_voice*)          echo audio-input-microphone ;;
-        new_img*)            echo image-x-generic ;;
+        new_img*|new_animated_webP*) echo image-x-generic ;;
         *HTLM*|*HTML*|*html*) echo text-html ;;
         *)                   echo text-x-generic ;;
     esac
@@ -185,6 +185,7 @@ desc_for() {
         new_file_from_clipboard_lite.py)   echo "Save clipboard text as a file with detected extension (lite)" ;;
         new_file_from_LLM.py)              echo "Chat with a local LLM and save produced files" ;;
         new_img.py)                        echo "Create numbered placeholder color images" ;;
+        new_animated_webP_from_files.py)   echo "Create an animated WebP from image files" ;;
         new_voice.py)                      echo "Create numbered speech (TTS) files" ;;
         new_HTLM_from_clipboard_paste.py)  echo "Save clipboard rich text as HTML file" ;;
         *)                                 echo "dev_helper new-file script" ;;
