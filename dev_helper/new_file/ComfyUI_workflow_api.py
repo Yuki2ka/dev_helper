@@ -472,7 +472,12 @@ def pack_images(paths: list[Path]) -> Path:
             # keep aspect ratio inside the cell
             scale = min(cell / img.width, cell / img.height)
             w, h = max(1, int(img.width * scale)), max(1, int(img.height * scale))
-            resized = img.resize((w, h), Image.Resampling.LANCZOS)
+            resample = (
+                Image.Resampling.LANCZOS
+                if hasattr(Image, "Resampling")
+                else Image.LANCZOS
+            )
+            resized = img.resize((w, h), resample)
             try:
                 x = (i % cols) * cell + (cell - w) // 2
                 y = (i // cols) * cell + (cell - h) // 2
@@ -924,8 +929,16 @@ def plan_image_jobs(image_paths: list[Path], image_mode: str,
             if len(image_paths) > len(load_node_ids):
                 print(f"[image ] Workflow has {len(load_node_ids)} LoadImage nodes; "
                       f"using first {len(load_node_ids)} of {len(image_paths)} images.")
-            names = [n for n in (upload_fn(p) for p in usable) if n]
-            return [names] if names else [None]
+            names = []
+            for image_path in usable:
+                name = upload_fn(image_path)
+                # Keep node/image positions aligned.  If one upload fails,
+                # silently filtering it would attach later images to the wrong
+                # LoadImage nodes.
+                if not name:
+                    return [None]
+                names.append(name)
+            return [names]
         # Single LoadImage: pack all images into one grid image
         try:
             packed = pack_images(image_paths)

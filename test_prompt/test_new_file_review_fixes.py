@@ -56,6 +56,20 @@ class ComfyWaitTests(unittest.TestCase):
     def setUpClass(cls):
         cls.module = load_script("comfy_wait_test", "dev_helper/new_file/ComfyUI_workflow_api.py")
 
+    def test_failed_multi_image_upload_does_not_shift_node_assignments(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            paths = [Path(temp_dir) / "first.png", Path(temp_dir) / "second.png"]
+            calls = []
+
+            def upload(path):
+                calls.append(path)
+                return None if path == paths[0] else "second-upload"
+
+            result = self.module.plan_image_jobs(paths, "combine", ["1", "2"], upload)
+
+            self.assertEqual(result, [None])
+            self.assertEqual(calls, [paths[0]])
+
     def test_already_completed_job_is_found_via_history(self):
         module = self.module
         history = {
@@ -84,6 +98,19 @@ class DiskIsoTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.module = load_script("new_disk_review_test", "dev_helper/new_file/new_disk_from_files.py")
+
+    def test_output_file_is_not_reused_as_an_input(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            output = root / "disk.iso"
+            output.write_bytes(b"old image")
+            source = root / "source.txt"
+            source.write_text("source", encoding="utf-8")
+            file_map = {"disk.iso": output, "source.txt": source}
+
+            filtered = self.module.exclude_output_file(file_map, output)
+
+            self.assertEqual(filtered, {"source.txt": source})
 
     def test_external_iso_tool_uses_sources_without_staging_copy(self):
         module = self.module

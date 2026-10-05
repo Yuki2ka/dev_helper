@@ -340,6 +340,16 @@ def iso_name(component):
     return "".join(cleaned)[:191] or "FILE"
 
 
+def exclude_output_file(file_map, out_path):
+    """Return *file_map* without an input that aliases the output path."""
+    output_resolved = Path(out_path).resolve()
+    return {
+        disk_path: local
+        for disk_path, local in file_map.items()
+        if local.resolve() != output_resolved
+    }
+
+
 def sanitize_label(label, limit, allowed_extra="_"):
     cleaned = "".join(
         char.upper() if (char.isalnum() or char in allowed_extra) else "_"
@@ -633,12 +643,34 @@ def main(argv=None):
         print("❌ No files to put into the image.")
         return
 
-    total_size = sum(p.stat().st_size for p in file_map.values())
-
     fmt = choose_format(FORMAT)
     if fmt is None:
         return
     backend = backend_for(fmt)
+
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    if args.output:
+        out_location = Path(args.output)
+    else:
+        out_location = _resolved.parent
+
+    out_path = choose_output_file(
+        location=out_location,
+        default_stem=f"new_disk_{timestamp}",
+        default_suffix=f".{fmt}",
+        overwrite=OVERWRITE,
+    )
+
+    # Do not feed an existing output back into the image when the output path is
+    # inside an input directory (or was explicitly passed as an input).  This is
+    # especially important for direct graft-point ISO creation: the external
+    # tool may truncate the output while it is still reading that source file.
+    file_map = exclude_output_file(file_map, out_path)
+    if not file_map:
+        print("❌ No input files remain after excluding the output image.")
+        return
+
+    total_size = sum(p.stat().st_size for p in file_map.values())
 
     if backend and backend.startswith("pyfatfs"):
         # FAT32 stores file sizes in 4 bytes: a single file >= 4 GiB cannot fit.
@@ -660,19 +692,6 @@ def main(argv=None):
         if not confirm(f"Create the {fmt} image anyway?"):
             print("Cancelled.")
             return
-
-    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    if args.output:
-        out_location = Path(args.output)
-    else:
-        out_location = _resolved.parent
-
-    out_path = choose_output_file(
-        location=out_location,
-        default_stem=f"new_disk_{timestamp}",
-        default_suffix=f".{fmt}",
-        overwrite=OVERWRITE,
-    )
 
     # Space estimate: worst-case bytes that will exist under out_path's drive.
     needs_fat_image = backend is not None and backend.startswith("pyfatfs")

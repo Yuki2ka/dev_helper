@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import platform
 import tempfile
 import unittest
 from datetime import datetime
@@ -35,6 +36,7 @@ class AddMissingTxtCaptionTests(unittest.TestCase):
         self.assertEqual(mtime.month, 1)
         self.assertEqual(mtime.day, 1)
 
+    @unittest.skipUnless(platform.system() == "Windows", "creation time is only set on Windows")
     def test_set_file_date_1980_creation_time_windows(self):
         if not MODULE_AVAILABLE:
             self.skipTest("Module not available")
