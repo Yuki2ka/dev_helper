@@ -11,7 +11,6 @@ QUANTIZE = False   # True: Stepped pentatonic, False: Smooth sweep
 # === SETTINGS END ===
 
 import argparse
-import os
 import re
 import numpy as np
 from pydub import AudioSegment
@@ -136,8 +135,10 @@ def main(argv=None):
     dir_path = resolved.first
 
     if dir_path.is_dir():
+        output_dir = dir_path
         base_name = "sweep"
     else:
+        output_dir = dir_path.parent
         base_name = dir_path.stem or "sweep"
 
     m = re.match(r'^(.*?)(\d+)$', base_name)
@@ -149,7 +150,7 @@ def main(argv=None):
         stem = f"{prefix}{idx}"
         ext = f".{args.format}"
 
-        candidate_path = dir_path / f"{stem}{ext}"
+        candidate_path = output_dir / f"{stem}{ext}"
 
         final_path = choose_output_file(
             location=candidate_path,

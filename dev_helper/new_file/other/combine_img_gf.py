@@ -143,14 +143,14 @@ def main(argv=None):
         overwrite=OVERWRITE,
     )
 
-    output_filename = out_path.name
+    output_path_resolved = out_path.resolve()
 
     valid_exts = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tiff", ".tif", ".avif", ".jxl", ".heic", ".heif", ".svg"}
     all_files = [
         f for f in iter_existing_files(resolved.paths, recursive=True)
         if f.suffix.lower() in valid_exts
     ]
-    files = [f for f in all_files if f.name != output_filename]
+    files = [f for f in all_files if f.resolve() != output_path_resolved]
     
     if SORT_BY == "NAME":
         files.sort()
@@ -167,7 +167,8 @@ def main(argv=None):
     images = []
     for f in files:
         try:
-            img = Image.open(f).convert("RGBA")
+            with Image.open(f) as source:
+                img = source.convert("RGBA")
             img = constrain_resize(img, IMAGE_W_MAX, IMAGE_W_MIN, IMAGE_H_MAX, IMAGE_H_MIN)
             images.append(img)
         except Exception as e:

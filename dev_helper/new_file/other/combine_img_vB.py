@@ -56,9 +56,10 @@ def resize_with_limits(img):
 
 
 def get_images():
+    output_path = Path(OUTPUT_FILE).resolve()
     files = [
         p for p in Path(".").iterdir()
-        if p.is_file() and p.suffix.lower() in IMAGE_EXTS
+        if p.is_file() and p.suffix.lower() in IMAGE_EXTS and p.resolve() != output_path
     ]
 
     if SORT_BY == "NAME":
@@ -156,7 +157,8 @@ def main():
 
     for f in files:
         try:
-            img = Image.open(f).convert("RGBA")
+            with Image.open(f) as source:
+                img = source.convert("RGBA")
             img = resize_with_limits(img)
             images.append(img)
             print("Added:", f.name, img.size)

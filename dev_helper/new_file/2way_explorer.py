@@ -214,32 +214,44 @@ class CancellationToken:
 # =============================================================================
 
 class _FileCache:
-    """mtime-based cache for file contents and derived data."""
+    """File-stat-based cache for file contents and derived data.
+
+    ``cache_key`` can include formatting inputs (for example, the relative path
+    printed in a content block) while ``path`` always remains the real file to
+    stat.  Keeping those separate is important: a synthetic cache key is not a
+    valid filesystem path.
+    """
 
     def __init__(self):
-        self._cache: dict[str, tuple[float, object]] = {}
+        self._cache: dict[str, tuple[tuple[int, int], object]] = {}
         self._lock = threading.Lock()
 
-    def get(self, path: str) -> object | None:
-        key = os.path.normcase(path)
+    @staticmethod
+    def _file_version(path: str) -> tuple[int, int] | None:
         try:
-            mtime = os.path.getmtime(path)
+            stat = os.stat(path)
         except OSError:
+            return None
+        return stat.st_mtime_ns, stat.st_size
+
+    def get(self, path: str, cache_key: str | None = None) -> object | None:
+        key = os.path.normcase(cache_key if cache_key is not None else path)
+        version = self._file_version(path)
+        if version is None:
             return None
         with self._lock:
             cached = self._cache.get(key)
-            if cached and cached[0] == mtime:
+            if cached and cached[0] == version:
                 return cached[1]
         return None
 
-    def put(self, path: str, value: object):
-        key = os.path.normcase(path)
-        try:
-            mtime = os.path.getmtime(path)
-        except OSError:
+    def put(self, path: str, value: object, cache_key: str | None = None):
+        key = os.path.normcase(cache_key if cache_key is not None else path)
+        version = self._file_version(path)
+        if version is None:
             return
         with self._lock:
-            self._cache[key] = (mtime, value)
+            self._cache[key] = (version, value)
 
     def clear(self):
         with self._lock:
@@ -251,13 +263,14 @@ _sig_cache = _FileCache()
 
 
 def _get_cached_chunk(fp: str, rel: str) -> str | None:
-    key = os.path.normcase(fp) + "|" + rel.replace("\\", "/")
-    cached = _chunk_cache.get(key)
+    settings_key = f"{CONTENT_MARK_FORMAT}|lf={CONVERT_TO_LF}|tabs={CONVERT_TO_TABS}"
+    key = os.path.normcase(fp) + "|" + rel.replace("\\", "/") + "|" + settings_key
+    cached = _chunk_cache.get(fp, cache_key=key)
     if cached is not None:
         return cached
     result = tc._read_file_content(fp, rel)
     if result is not None:
-        _chunk_cache.put(key, result)
+        _chunk_cache.put(fp, result, cache_key=key)
     return result
 
 
@@ -272,8 +285,9 @@ def _get_cached_sig(fp: str) -> str | None:
         return None
     ext = os.path.splitext(fp)[1].lstrip(".").lower()
     sig_text, _ = extract_signatures(content, ext)
-    if sig_text:
-        _sig_cache.put(fp, sig_text)
+    # Cache empty results too; otherwise files with no extractable signatures
+    # are fully read and parsed again on every refresh.
+    _sig_cache.put(fp, sig_text)
     return sig_text
 
 

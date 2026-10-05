@@ -67,16 +67,23 @@ def save_tts_to_format(engine, text, out_path_str, fmt):
                 success = True
                 break
             except (subprocess.SubprocessError, FileNotFoundError):
-                continue
-        
-        os.remove(tmp_wav)
-        
-        if not success:
-            fallback_path = os.path.splitext(out_path_str)[0] + ".wav"
-            os.rename(tmp_wav, fallback_path)
-            print(f"Warning: Opus encoder missing. Saved as WAV instead: {fallback_path}", file=sys.stderr)
-            return fallback_path
-            
+                # A failed encoder may leave a partial destination behind.
+                Path(out_path_str).unlink(missing_ok=True)
+
+        if success:
+            Path(tmp_wav).unlink(missing_ok=True)
+            return out_path_str
+
+        fallback_candidate = Path(out_path_str).with_suffix(".wav")
+        fallback_path = choose_output_file(
+            location=fallback_candidate,
+            default_stem=fallback_candidate.stem,
+            default_suffix=".wav",
+        )
+        os.replace(tmp_wav, fallback_path)
+        print(f"Warning: Opus encoder missing. Saved as WAV instead: {fallback_path}", file=sys.stderr)
+        return str(fallback_path)
+
     return out_path_str
 
 
@@ -84,7 +91,7 @@ def main(argv=None):
     args = parse_args(argv)
 
     # 1. Resolve text using command_paths (handles args -> stdin -> clipboard automatically)
-    resolved_text = resolve_input_text(args, arg_names=("text",))
+    resolved_text = resolve_input_text(args, arg_names=("text",), constant=TEXT)
     if not resolved_text.text.strip():
         print("Error: No text provided. Pass --text '...', pipe via stdin, or copy to clipboard.", file=sys.stderr)
         sys.exit(1)
@@ -97,8 +104,10 @@ def main(argv=None):
 
     # Determine base name for auto-increment logic
     if dir_path.is_dir():
+        output_dir = dir_path
         base_name = "voice"
     else:
+        output_dir = dir_path.parent
         base_name = dir_path.stem
 
     m = re.match(r"^(.*?)(\d+)$", base_name)
@@ -115,7 +124,7 @@ def main(argv=None):
         stem = f"{prefix}{idx}"
         ext = f".{args.format}"
         
-        candidate_path = dir_path / f"{stem}{ext}"
+        candidate_path = output_dir / f"{stem}{ext}"
         
         # Safe collision resolution using command_paths.choose_output_file
         final_path = choose_output_file(

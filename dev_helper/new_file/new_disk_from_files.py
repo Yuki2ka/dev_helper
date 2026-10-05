@@ -403,11 +403,58 @@ def create_iso_pycdlib(file_map, out_path, label):
     iso.close()
 
 
+def _escape_graft_point(value):
+    """Escape a path used in mkisofs-family ``target=source`` syntax."""
+    return str(value).replace("\\", "\\\\").replace("=", "\\=")
+
+
+def _iso_tool_command(tool, out_path, label):
+    if tool.stem == "xorriso":
+        return [str(tool), "-as", "mkisofs", "-J", "-input-charset", "utf-8",
+                "-V", sanitize_label(label, 32), "-o", str(out_path)]
+    return [str(tool), "-J", "-V", sanitize_label(label, 32),
+            "-o", str(out_path)]
+
+
 def create_iso_tool(tool_name, file_map, out_path, label):
-    """Create an ISO via xorriso / genisoimage / mkisofs using a staged copy."""
+    """Create an ISO directly from source files via graft points.
+
+    xorriso, genisoimage, and mkisofs all support path-list graft points. This
+    avoids copying every input into a temporary staging tree first. A staged
+    retry remains as a compatibility fallback for unusual tool builds.
+    """
     tool = find_tool(tool_name)
     if tool is None:
         raise RuntimeError(f"{tool_name} executable not found.")
+    base_command = _iso_tool_command(tool, out_path, label)
+
+    # A line-based path list cannot represent newlines in names. Use the
+    # compatible staged path immediately in that case.
+    can_use_path_list = all(
+        "\n" not in disk_path and "\r" not in disk_path
+        and "\n" not in str(local) and "\r" not in str(local)
+        for disk_path, local in file_map.items()
+    )
+    direct_error = None
+    if can_use_path_list:
+        with tempfile.TemporaryDirectory(prefix="iso_paths_") as temp_dir:
+            path_list = Path(temp_dir) / "graft-points.txt"
+            lines = [
+                f"{_escape_graft_point(disk_path)}={_escape_graft_point(local.resolve())}\n"
+                for disk_path, local in sorted(file_map.items())
+            ]
+            path_list.write_text("".join(lines), encoding="utf-8")
+            command = [*base_command, "-graft-points", "-path-list", str(path_list)]
+            result = subprocess.run(command, capture_output=True, text=True)
+            if result.returncode == 0:
+                return
+            direct_error = result.stderr.strip() or result.stdout.strip()
+            out_path.unlink(missing_ok=True)
+            print(
+                f"⚠ Direct graft-point ISO creation failed; retrying with staging: {direct_error}",
+                file=sys.stderr,
+            )
+
     with tempfile.TemporaryDirectory(prefix="iso_stage_") as stage:
         stage_root = Path(stage)
         for disk_path, local in file_map.items():
@@ -415,15 +462,15 @@ def create_iso_tool(tool_name, file_map, out_path, label):
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(local, target)
 
-        if tool.stem == "xorriso":
-            command = [str(tool), "-as", "mkisofs", "-J", "-input-charset", "utf-8",
-                       "-V", sanitize_label(label, 32), "-o", str(out_path), str(stage_root)]
-        else:
-            command = [str(tool), "-J", "-V", sanitize_label(label, 32),
-                       "-o", str(out_path), str(stage_root)]
-        result = subprocess.run(command, capture_output=True, text=True)
+        result = subprocess.run(
+            [*base_command, str(stage_root)],
+            capture_output=True,
+            text=True,
+        )
         if result.returncode != 0:
             message = result.stderr.strip() or result.stdout.strip()
+            if direct_error:
+                message = f"direct mode: {direct_error}\nstaged mode: {message}"
             raise RuntimeError(f"{tool_name} error:\n{message}")
 
 
@@ -631,9 +678,9 @@ def main(argv=None):
     needs_fat_image = backend is not None and backend.startswith("pyfatfs")
     image_size = fat_image_size(total_size) if needs_fat_image else 0
     if fmt == "iso":
+        # External tools read source files directly via graft points; no full
+        # staged copy normally shares the output drive.
         estimate = total_size + 32 * MiB
-        if backend != "pycdlib":
-            estimate += total_size  # staged copy for xorriso/mkisofs
     elif fmt == "vhdx":
         estimate = 2 * image_size
     else:

@@ -4,9 +4,6 @@ import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
-from unittest.mock import patch
-
-from .conftest import chdir
 
 try:
     from dev_helper.new_file.add_missing_txt_caption import (
@@ -99,6 +96,22 @@ class AddMissingTxtCaptionTests(unittest.TestCase):
         self.assertEqual(count, 1)
         caption = sub / "nested.txt"
         self.assertTrue(caption.exists())
+
+    def test_uppercase_extension_in_directory(self):
+        if not MODULE_AVAILABLE:
+            self.skipTest("Module not available")
+        (self.root / "PHOTO.JPG").touch()
+        count = _process_images([self.root], no_confirm=True)
+        self.assertEqual(count, 1)
+        self.assertTrue((self.root / "PHOTO.txt").exists())
+
+    def test_overlapping_inputs_are_deduplicated(self):
+        if not MODULE_AVAILABLE:
+            self.skipTest("Module not available")
+        image = self.root / "photo.jpg"
+        image.touch()
+        files = list(_collect_image_files([self.root, image]))
+        self.assertEqual(files, [image])
 
     def test_collect_image_files(self):
         if not MODULE_AVAILABLE:

@@ -20,10 +20,13 @@ except ImportError:
 import argparse
 
 
+HASH_BLOCK_SIZE = 1024 * 1024
+
+
 def get_file_hash(file_path):
     hash_md5 = hashlib.md5()
     with open(file_path, 'rb') as f:
-        for chunk in iter(lambda: f.read(4096), b""):
+        for chunk in iter(lambda: f.read(HASH_BLOCK_SIZE), b""):
             hash_md5.update(chunk)
     return hash_md5.hexdigest()
 
@@ -38,7 +41,7 @@ def check_or_create_hash_in_directory(base_path):
         if base_path.is_file():
             files = [base_path]
         else:
-            files = sorted(base_path.rglob("*"))
+            files = sorted(path for path in base_path.rglob("*") if path.is_file())
 
     for file_path in files:
         if file_path.name == script_name or file_path.suffix == ".md5":

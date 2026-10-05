@@ -93,8 +93,10 @@ def main(argv=None):
     dir_path = resolved.first
 
     if dir_path.is_dir():
+        output_dir = dir_path
         base_name = str(args.number)
     else:
+        output_dir = dir_path.parent
         base_name = dir_path.stem or str(args.number)
 
     m = re.match(r"^(.*?)(\d+)$", base_name)
@@ -109,7 +111,7 @@ def main(argv=None):
         stem = f"{prefix}{idx}"
         ext = f".{FORMAT}"
 
-        candidate_path = dir_path / f"{stem}{ext}"
+        candidate_path = output_dir / f"{stem}{ext}"
 
         final_path = choose_output_file(
             location=candidate_path,

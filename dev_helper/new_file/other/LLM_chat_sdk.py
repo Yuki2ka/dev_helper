@@ -29,11 +29,14 @@ from openai import OpenAI
 
 BASE_URL = os.environ.get("KILO_GATEWAY_URL", "https://api.kilo.ai/api/gateway")
 HEADERS = {"HTTP-Referer": "https://kilo.ai/", "X-Title": "Kilo Code"}
+HTTP_TIMEOUT = (10, 60)
 
 
 def free_models() -> list[str]:
     """Fetch the live list of free models from the Kilo Gateway (no auth needed)."""
-    resp = requests.get(f"{BASE_URL.rstrip('/')}/models", headers=HEADERS)
+    resp = requests.get(
+        f"{BASE_URL.rstrip('/')}/models", headers=HEADERS, timeout=HTTP_TIMEOUT
+    )
     resp.raise_for_status()
     return [m["id"] for m in resp.json()["data"] if m.get("isFree")]
 
@@ -59,6 +62,7 @@ def stream(prompt: str, model: str) -> None:
         api_key=os.environ.get("KILO_API_KEY", "anonymous"),
         base_url=BASE_URL,
         default_headers=HEADERS,
+        timeout=300.0,
     )
     chunks = client.chat.completions.create(
         model=model,

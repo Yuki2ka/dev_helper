@@ -110,7 +110,7 @@ def save_audio(out_path, raw_pcm, fmt, sample_rate=48000):
         wav_file.writeframes(raw_pcm)
         
     if fmt == "wav":
-        return
+        return out_path
 
     # Handle Opus conversion via external tools (ffmpeg or opusenc)
     success = False
@@ -121,21 +121,22 @@ def save_audio(out_path, raw_pcm, fmt, sample_rate=48000):
             success = True
             break
         except (subprocess.SubprocessError, FileNotFoundError):
-            continue
-            
-    # Clean up temporary WAV
-    if os.path.exists(temp_wav):
-        os.remove(temp_wav)
-        
-    if not success:
-        # Fallback action: keep the WAV format instead of failing out completely
-        fallback_path = os.path.splitext(out_path)[0] + ".wav"
-        with wave.open(fallback_path, 'wb') as wav_file:
-            wav_file.setnchannels(1)
-            wav_file.setsampwidth(2)
-            wav_file.setframerate(sample_rate)
-            wav_file.writeframes(raw_pcm)
-        print(f"Warning: Codec engine missing. Exported WAV fallback instead: {fallback_path}", file=sys.stderr)
+            Path(out_path).unlink(missing_ok=True)
+
+    if success:
+        Path(temp_wav).unlink(missing_ok=True)
+        return out_path
+
+    # Keep the already-generated WAV rather than deleting and regenerating it.
+    fallback_candidate = Path(out_path).with_suffix(".wav")
+    fallback_path = choose_output_file(
+        location=fallback_candidate,
+        default_stem=fallback_candidate.stem,
+        default_suffix=".wav",
+    )
+    os.replace(temp_wav, fallback_path)
+    print(f"Warning: Codec engine missing. Exported WAV fallback instead: {fallback_path}", file=sys.stderr)
+    return str(fallback_path)
 
 
 def main(argv=None):
@@ -156,8 +157,10 @@ def main(argv=None):
     dir_path = resolved.first
 
     if dir_path.is_dir():
+        output_dir = dir_path
         base_name = str(NUMBER)
     else:
+        output_dir = dir_path.parent
         base_name = dir_path.stem or str(NUMBER)
 
     m = re.match(r'^(.*?)(\d+)$', base_name)
@@ -169,7 +172,7 @@ def main(argv=None):
         stem = f"{prefix}{idx}"
         ext = f".{FORMAT}"
 
-        candidate_path = dir_path / f"{stem}{ext}"
+        candidate_path = output_dir / f"{stem}{ext}"
 
         final_path = choose_output_file(
             location=candidate_path,
@@ -179,9 +182,9 @@ def main(argv=None):
 
         freq = get_frequency(i, quantize=QUANTIZE)
         raw_audio = generate_sine_wave(freq, DURATION, VOLUME, SAMPLE_RATE)
-        save_audio(str(final_path), raw_audio, FORMAT, SAMPLE_RATE)
+        saved_path = save_audio(str(final_path), raw_audio, FORMAT, SAMPLE_RATE)
 
-        print(f"Created: {final_path} ({freq:.2f} Hz)")
+        print(f"Created: {saved_path} ({freq:.2f} Hz)")
 
 
 if __name__ == "__main__":

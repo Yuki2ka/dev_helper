@@ -32,11 +32,15 @@ HEADERS = {
     "HTTP-Referer": "https://kilo.ai/",
     "X-Title": "Kilo Code",
 }
+HTTP_TIMEOUT = (10, 60)
+STREAM_TIMEOUT = (10, 300)
 
 
 def free_models() -> list[str]:
     """Fetch the live list of free models from the Kilo Gateway (no auth needed)."""
-    resp = requests.get(f"{BASE_URL.rstrip('/')}/models", headers=HEADERS)
+    resp = requests.get(
+        f"{BASE_URL.rstrip('/')}/models", headers=HEADERS, timeout=HTTP_TIMEOUT
+    )
     resp.raise_for_status()
     return [m["id"] for m in resp.json()["data"] if m.get("isFree")]
 
@@ -58,22 +62,23 @@ def choose_model() -> str:
 
 
 def stream(prompt: str, model: str) -> None:
-    resp = requests.post(
+    with requests.post(
         f"{BASE_URL.rstrip('/')}/chat/completions",
         headers={**HEADERS, "Authorization": f"Bearer {os.environ.get('KILO_API_KEY', 'anonymous')}"},
         json={"model": model, "stream": True, "messages": [{"role": "user", "content": prompt}]},
         stream=True,
-    )
-    resp.raise_for_status()
-    for line in resp.iter_lines(decode_unicode=True):
-        if not line or not line.startswith("data:"):
-            continue
-        data = line[len("data:"):].strip()
-        if data == "[DONE]":
-            break
-        tok = json.loads(data)["choices"][0]["delta"].get("content", "")
-        if tok:
-            print(tok, end="", flush=True)
+        timeout=STREAM_TIMEOUT,
+    ) as resp:
+        resp.raise_for_status()
+        for line in resp.iter_lines(decode_unicode=True):
+            if not line or not line.startswith("data:"):
+                continue
+            data = line[len("data:"):].strip()
+            if data == "[DONE]":
+                break
+            tok = json.loads(data)["choices"][0]["delta"].get("content", "")
+            if tok:
+                print(tok, end="", flush=True)
     print()
 
 

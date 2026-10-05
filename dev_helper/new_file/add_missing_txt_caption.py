@@ -17,7 +17,6 @@ import argparse
 import datetime
 import os
 import platform
-import sys
 from pathlib import Path
 
 try:
@@ -42,14 +41,28 @@ def parse_args(argv=None):
 
 
 def _collect_image_files(paths):
-    """Yield image files from given paths (files or directories)."""
+    """Yield image files from given paths (files or directories).
+
+    Directories are traversed once and suffixes are compared case-insensitively,
+    so ``PHOTO.JPG`` works on case-sensitive filesystems too.
+    """
+    extensions = {f".{ext.lower().lstrip('.')}" for ext in EXT}
+    seen = set()
     for raw in paths:
         path = Path(raw) if isinstance(raw, (str, os.PathLike)) else raw
-        if path.is_file() and path.suffix.lstrip(".").lower() in EXT:
-            yield path
+        if path.is_file():
+            candidates = (path,)
         elif path.is_dir():
-            for ext in EXT:
-                yield from path.rglob(f"*.{ext}")
+            candidates = path.rglob("*")
+        else:
+            continue
+        for candidate in candidates:
+            if not candidate.is_file() or candidate.suffix.lower() not in extensions:
+                continue
+            key = os.path.normcase(str(candidate.resolve()))
+            if key not in seen:
+                seen.add(key)
+                yield candidate
 
 
 def _set_file_date_1980(path: Path):

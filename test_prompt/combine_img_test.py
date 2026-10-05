@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import importlib.util
 import json
-import sys
 import tempfile
 import time
 import unittest
@@ -33,8 +32,6 @@ _COMBINE = _ROOT / "dev_helper" / "new_file" / "combine_img.py"
 _spec = importlib.util.spec_from_file_location("combine_img", str(_COMBINE))
 combine_img = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(combine_img)
-
-import path_args.command_paths as _command_paths
 
 _FAILURES_DIR = _HERE.parent / "test_failures"
 _FAILURES_DIR.mkdir(exist_ok=True)
@@ -130,10 +127,16 @@ class ConstrainResizeTests(unittest.TestCase):
         out = combine_img.constrain_resize(img, 200, 200, 200, None)
         self.assertEqual(out.size, (200, 200))
 
-    def test_max_takes_priority_over_min(self):
+    def test_max_takes_priority_over_conflicting_min(self):
         img = Image.new("RGBA", (1000, 1000), (255, 0, 0, 255))
         out = combine_img.constrain_resize(img, 100, None, 100, 200)
-        self.assertEqual(out.size, (200, 200))
+        self.assertEqual(out.size, (100, 100))
+
+    def test_conflicting_height_min_does_not_distort_wide_image(self):
+        img = Image.new("RGBA", (1000, 100), (255, 0, 0, 255))
+        out = combine_img.constrain_resize(img, 512, None, 256, 256)
+        self.assertEqual(out.size, (512, 51))
+        self.assertAlmostEqual(out.width / out.height, img.width / img.height, delta=0.1)
 
     def test_min_enforced_after_rounding(self):
         img = Image.new("RGBA", (3, 3), (255, 0, 0, 255))
@@ -183,8 +186,21 @@ class ParseArgsTests(unittest.TestCase):
 
     def test_override_bg_and_alpha(self):
         ns = combine_img.parse_args(["--bg", "10,20,30", "--alpha", "128"])
-        self.assertEqual(ns.bg, "10,20,30")
+        self.assertEqual(ns.bg, (10, 20, 30))
         self.assertEqual(ns.alpha, 128)
+
+    def test_invalid_grid_and_color_values_raise(self):
+        invalid_args = [
+            ["--rows", "0"],
+            ["--pad", "-1"],
+            ["--alpha", "256"],
+            ["--bg", "1,2"],
+            ["--bg", "0,0,999"],
+            ["--format", "jpeg"],
+        ]
+        for argv in invalid_args:
+            with self.subTest(argv=argv), self.assertRaises(SystemExit):
+                combine_img.parse_args(argv)
 
     def test_invalid_arrange_raises(self):
         with self.assertRaises(SystemExit):
@@ -423,6 +439,23 @@ class GridLayoutTests(unittest.TestCase):
         self._assert_and_save(img, out, img.mode == "RGBA",
                               "test_background_with_alpha", {"expected_mode": "RGBA", "actual_mode": img.mode})
         img.close()
+
+    def test_output_exclusion_uses_full_path_not_filename(self):
+        img_dir = self.root / "imgs"
+        nested = img_dir / "nested"
+        nested.mkdir(parents=True)
+        _make_test_image(img_dir / "source.png", 10, 10, (255, 0, 0, 255))
+        _make_test_image(nested / "combined.png", 10, 10, (0, 0, 255, 255))
+        output = img_dir / "combined.png"
+        _make_test_image(output, 1, 1, (0, 0, 0, 255))
+
+        _run_combine(
+            str(img_dir), "-o", str(output), "--rows", "1", "--format", "png",
+            "--pad", "0", "--img-w-max", "-1", "--img-h-max", "-1",
+            "--img-w-min", "-1", "--img-h-min", "-1",
+        )
+        with Image.open(output) as result:
+            self.assertEqual(result.size, (20, 10))
 
     def test_empty_directory_prints_message(self):
         empty_dir = self.root / "empty"

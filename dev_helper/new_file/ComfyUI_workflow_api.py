@@ -9,20 +9,24 @@ import tempfile
 import urllib.parse
 import urllib.request
 import uuid
-import random
 import copy
 import re
 import datetime
+import time
 import websocket #pip install websocket-client
 from pathlib import Path
-from typing import Any
 
 try:
     from PIL import Image  # used for combining multiple input images into one grid
 except ImportError:
     Image = None
 
-from command_paths import _clipboard_text, paths_from_clipboard
+_resolved = Path(__file__).resolve()
+_PROJECT_ROOT = _resolved.parents[2] if len(_resolved.parents) >= 3 else None
+if _PROJECT_ROOT is not None and str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+
+from path_args.command_paths import _clipboard_text, paths_from_clipboard
 
 # === SETTINGS START ===
 WORKFLOW_FILE       = "ComfyUI_workflow_api_qwen2512.json"  # fallback if input has no .json workflows
@@ -64,6 +68,9 @@ TEXT_EXTS  = {".txt", ".md", ".caption"}
 WORKFLOW_EXTS = {".json"}  # .json inputs are treated as workflows and always ALL run
 
 SERVER_ADDRESS      = "127.0.0.1:8188"
+HTTP_TIMEOUT_SECONDS = 30     # Timeout for individual ComfyUI HTTP/connect operations
+WEBSOCKET_POLL_SECONDS = 2    # Also controls REST history reconciliation frequency
+WAIT_TIMEOUT_SECONDS = 3600   # Overall batch wait limit
 
 DISABLE_OUTPUT_SAVE = True    # replace SaveImage to PreviewImage (ComfyUI do no output )
 
@@ -215,65 +222,190 @@ def queue_prompt(prompt):
     p = {"prompt": prompt, "client_id": CLIENT_ID}
     data = json.dumps(p).encode('utf-8')
     req = urllib.request.Request(f"http://{SERVER_ADDRESS}/prompt", data=data)
-    return json.loads(urllib.request.urlopen(req).read())
+    with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT_SECONDS) as response:
+        return json.loads(response.read())
+
 
 def get_image(filename, subfolder, folder_type):
     data = {"filename": filename, "subfolder": subfolder, "type": folder_type}
     url_values = urllib.parse.urlencode(data)
-    with urllib.request.urlopen(f"http://{SERVER_ADDRESS}/view?{url_values}") as response:
+    with urllib.request.urlopen(
+        f"http://{SERVER_ADDRESS}/view?{url_values}",
+        timeout=HTTP_TIMEOUT_SECONDS,
+    ) as response:
         return response.read()
 
-def wait_and_download_image(prompt_workflow, output_dir: str | None = None):
-    if output_dir is None: output_dir = os.getcwd()
+
+def _get_prompt_history(prompt_id: str) -> dict | None:
+    with urllib.request.urlopen(
+        f"http://{SERVER_ADDRESS}/history/{prompt_id}",
+        timeout=HTTP_TIMEOUT_SECONDS,
+    ) as response:
+        return json.loads(response.read()).get(prompt_id)
+
+
+def _history_terminal_state(history: dict | None) -> str | None:
+    """Return ``success``, ``failed``, or None for a non-terminal history entry."""
+    if not history:
+        return None
+    status = history.get("status") or {}
+    status_text = str(status.get("status_str", "")).lower()
+    if status_text in {"error", "failed", "interrupted"}:
+        return "failed"
+    if status_text == "success" or status.get("completed") is True:
+        return "success"
+    # Older ComfyUI versions do not include status, but completed history has
+    # an outputs mapping.
+    if "status" not in history and "outputs" in history:
+        return "success"
+    return None
+
+
+def wait_and_download_image(prompt_workflow, output_dir: str | None = None) -> bool:
+    if output_dir is None:
+        output_dir = os.getcwd()
     os.makedirs(output_dir, exist_ok=True)
     prompt_id = queue_prompt(prompt_workflow)['prompt_id']
-    _wait_for_prompts_and_download([prompt_id], output_dir)
+    return _wait_for_prompts_and_download([prompt_id], output_dir)
 
-def wait_and_download_batch(prompt_ids: list[str], output_dir: str | None = None):
-    if output_dir is None: output_dir = os.getcwd()
+
+def wait_and_download_batch(prompt_ids: list[str], output_dir: str | None = None) -> bool:
+    if output_dir is None:
+        output_dir = os.getcwd()
     os.makedirs(output_dir, exist_ok=True)
     if prompt_ids:
-        _wait_for_prompts_and_download(prompt_ids, output_dir)
+        return _wait_for_prompts_and_download(prompt_ids, output_dir)
+    return True
 
-def _wait_for_prompts_and_download(prompt_ids: list[str], output_dir: str):
-    ws = websocket.WebSocket()
-    ws.connect(f"ws://{SERVER_ADDRESS}/ws?clientId={CLIENT_ID}")
 
-    completed = set()
+def _wait_for_prompts_and_download(prompt_ids: list[str], output_dir: str) -> bool:
+    """Wait for queued prompts, reconciling websocket events with REST history.
+
+    History polling catches jobs that completed before this function connected
+    to the websocket and also provides a fallback if the websocket disconnects.
+    """
     remaining = set(prompt_ids)
+    failed = set()
+    deadline = time.monotonic() + WAIT_TIMEOUT_SECONDS
+    last_history_check = 0.0
+    history_error_prompts = set()
+    ws = None
 
     print(f"[wait  ] Monitoring queue for {len(prompt_ids)} images...")
+    try:
+        try:
+            ws = websocket.WebSocket()
+            ws.connect(
+                f"ws://{SERVER_ADDRESS}/ws?clientId={CLIENT_ID}",
+                timeout=HTTP_TIMEOUT_SECONDS,
+            )
+            ws.settimeout(WEBSOCKET_POLL_SECONDS)
+        except Exception as exc:
+            if ws is not None:
+                ws.close()
+            ws = None
+            print(
+                f"[wait  ] Websocket unavailable ({exc}); polling history instead.",
+                file=sys.stderr,
+            )
 
-    while remaining:
-        out = ws.recv()
-        if isinstance(out, str):
-            message = json.loads(out)
-            if message.get('type') == 'executing':
-                data = message.get('data', {})
-                if data.get('node') is None:
-                    pid = data.get('prompt_id')
-                    if pid in remaining:
+        while remaining:
+            now = time.monotonic()
+            if now >= deadline:
+                waiting = ", ".join(sorted(remaining))
+                print(f"!! Timed out waiting for prompt(s): {waiting}", file=sys.stderr)
+                return False
+
+            # Reconcile immediately, then periodically. This is the source of
+            # truth for completions missed before websocket connection.
+            if now - last_history_check >= WEBSOCKET_POLL_SECONDS:
+                last_history_check = now
+                for pid in list(remaining):
+                    try:
+                        history = _get_prompt_history(pid)
+                    except Exception as exc:
+                        if pid not in history_error_prompts:
+                            print(f"[wait  ] Could not check prompt {pid}: {exc}", file=sys.stderr)
+                            history_error_prompts.add(pid)
+                        continue
+                    history_error_prompts.discard(pid)
+                    state = _history_terminal_state(history)
+                    if state == "success":
                         print(f"[done  ] Prompt {pid} finished. Downloading...")
-                        _download_images_for_prompt(pid, output_dir)
-                        completed.add(pid)
+                        if not _download_images_for_prompt(pid, output_dir, history=history):
+                            print(f"!! Prompt {pid} produced no downloadable image.", file=sys.stderr)
+                            failed.add(pid)
                         remaining.remove(pid)
-    ws.close()
+                    elif state == "failed":
+                        status = (history or {}).get("status") or {}
+                        message = status.get("status_str") or "execution failed"
+                        print(f"!! Prompt {pid} failed: {message}", file=sys.stderr)
+                        remaining.remove(pid)
+                        failed.add(pid)
 
-def _download_images_for_prompt(prompt_id: str, output_dir: str) -> bool:
+            if not remaining:
+                break
+
+            if ws is None:
+                time.sleep(min(WEBSOCKET_POLL_SECONDS, max(0.0, deadline - time.monotonic())))
+                continue
+
+            try:
+                out = ws.recv()
+            except websocket.WebSocketTimeoutException:
+                continue
+            except Exception as exc:
+                print(
+                    f"[wait  ] Websocket disconnected ({exc}); polling history instead.",
+                    file=sys.stderr,
+                )
+                ws.close()
+                ws = None
+                continue
+
+            if not isinstance(out, str):
+                continue
+            try:
+                message = json.loads(out)
+            except json.JSONDecodeError:
+                continue
+
+            event_type = message.get("type")
+            data = message.get("data", {})
+            pid = data.get("prompt_id")
+            if pid not in remaining:
+                continue
+            if event_type in {"execution_error", "execution_interrupted"}:
+                detail = data.get("exception_message") or event_type
+                print(f"!! Prompt {pid} failed: {detail}", file=sys.stderr)
+                remaining.remove(pid)
+                failed.add(pid)
+            # Successful 'executing' events deliberately remain in the set
+            # until REST history is visible, avoiding a race with history write.
+    finally:
+        if ws is not None:
+            ws.close()
+
+    return not failed
+
+
+def _download_images_for_prompt(
+    prompt_id: str,
+    output_dir: str,
+    history: dict | None = None,
+) -> bool:
     saved_any = False
     try:
-        with urllib.request.urlopen(f"http://{SERVER_ADDRESS}/history/{prompt_id}") as response:
-            history = json.loads(response.read()).get(prompt_id, {})
-        for node_id in history.get('outputs', {}):
-            node_output = history['outputs'][node_id]
-            if 'images' in node_output:
-                for image in node_output['images']:
-                    image_data = get_image(image['filename'], image['subfolder'], image['type'])
-                    save_path = os.path.join(output_dir, f"output_{uuid.uuid4().hex[:6]}.png")
-                    with open(save_path, "wb") as f:
-                        f.write(image_data)
-                    print(f"image saved: {save_path}")
-                    saved_any = True
+        if history is None:
+            history = _get_prompt_history(prompt_id) or {}
+        for node_output in history.get('outputs', {}).values():
+            for image in node_output.get('images', []):
+                image_data = get_image(image['filename'], image['subfolder'], image['type'])
+                save_path = os.path.join(output_dir, f"output_{uuid.uuid4().hex[:6]}.png")
+                with open(save_path, "wb") as f:
+                    f.write(image_data)
+                print(f"image saved: {save_path}")
+                saved_any = True
     except Exception as exc:
         print(f"!! Failed to download images for prompt {prompt_id}: {exc}", file=sys.stderr)
     return saved_any
@@ -322,7 +454,8 @@ def pack_images(paths: list[Path]) -> Path:
     imgs = []
     for p in paths:
         try:
-            imgs.append(Image.open(p).convert("RGB"))
+            with Image.open(p) as source:
+                imgs.append(source.convert("RGB"))
         except Exception as exc:
             print(f"[image ] Skipped unreadable '{p.name}': {exc}")
     if not imgs:
@@ -334,18 +467,27 @@ def pack_images(paths: list[Path]) -> Path:
     cell = max(1, MAX_IMAGE_SIZE // max(cols, rows))
 
     canvas = Image.new("RGB", (cols * cell, rows * cell), (0, 0, 0))
-    for i, img in enumerate(imgs):
-        # keep aspect ratio inside the cell
-        scale = min(cell / img.width, cell / img.height)
-        w, h = max(1, int(img.width * scale)), max(1, int(img.height * scale))
-        resized = img.resize((w, h), Image.LANCZOS)
-        x = (i % cols) * cell + (cell - w) // 2
-        y = (i // cols) * cell + (cell - h) // 2
-        canvas.paste(resized, (x, y))
+    try:
+        for i, img in enumerate(imgs):
+            # keep aspect ratio inside the cell
+            scale = min(cell / img.width, cell / img.height)
+            w, h = max(1, int(img.width * scale)), max(1, int(img.height * scale))
+            resized = img.resize((w, h), Image.Resampling.LANCZOS)
+            try:
+                x = (i % cols) * cell + (cell - w) // 2
+                y = (i // cols) * cell + (cell - h) // 2
+                canvas.paste(resized, (x, y))
+            finally:
+                resized.close()
 
-    tmp = tempfile.NamedTemporaryFile(prefix="combined_", suffix=".png", delete=False)
-    tmp.close()
-    canvas.save(tmp.name, "PNG")
+        tmp = tempfile.NamedTemporaryFile(prefix="combined_", suffix=".png", delete=False)
+        tmp.close()
+        canvas.save(tmp.name, "PNG")
+    finally:
+        canvas.close()
+        for img in imgs:
+            img.close()
+
     print(f"[image ] Combined {len(imgs)} images into {cols}x{rows} grid -> {tmp.name}")
     return Path(tmp.name)
 
@@ -556,7 +698,7 @@ def upload_image_to_comfy(image_path: Path) -> str:
         headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
         method="POST"
     )
-    with urllib.request.urlopen(req) as resp:
+    with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT_SECONDS) as resp:
         info = json.loads(resp.read())
     name, subfolder = info.get("name") or filename, info.get("subfolder") or ""
     return f"{subfolder}/{name}" if subfolder else name
@@ -790,7 +932,10 @@ def plan_image_jobs(image_paths: list[Path], image_mode: str,
         except Exception as exc:
             print(f"!! Could not combine images: {exc}", file=sys.stderr)
             return [None]
-        name = upload_fn(packed)
+        try:
+            name = upload_fn(packed)
+        finally:
+            packed.unlink(missing_ok=True)
         return [[name]] if name else [None]
 
     # multi: 1 image per prompt
@@ -943,12 +1088,16 @@ def main() -> int:
         # Nothing to do at all
         return 1
 
-    # Now wait for all queued prompts to finish and download them
+    # Now wait for all queued prompts to finish and download them.
+    all_succeeded = True
     if prompt_ids:
-        wait_and_download_batch(prompt_ids, output_dir=str(output_dir))
+        all_succeeded = wait_and_download_batch(prompt_ids, output_dir=str(output_dir))
 
-    print("[finish] All images processed.")
-    return 0 if queued_total else 1
+    if all_succeeded:
+        print("[finish] All images processed.")
+    else:
+        print("[finish] Some prompts failed or timed out.", file=sys.stderr)
+    return 0 if queued_total and all_succeeded else 1
 
 
 if __name__ == "__main__":

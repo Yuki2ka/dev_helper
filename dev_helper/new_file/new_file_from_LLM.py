@@ -356,7 +356,7 @@ import threading
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Iterable, List, Optional, Tuple, Dict, Any, Union
+from typing import Iterable, List, Optional, Tuple, Dict, Any
 
 # ----------------------------------------------------
 # Project imports
@@ -367,12 +367,12 @@ if _PROJECT_ROOT is not None and str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 try:
-    from command_paths import resolve_paths, resolve_input_text, iter_existing_files
+    from path_args import resolve_paths, resolve_input_text, iter_existing_files
 except ImportError:
-    # Fallback if command_paths not available
-    def resolve_paths(**kwargs):
+    # Fallback for a copied script where path_args is not available.
+    def resolve_paths(*args, **kwargs):
         return type("RP", (), {"paths": (), "origin": "cwd", "first": Path.cwd()})()
-    def resolve_input_text(**kwargs):
+    def resolve_input_text(*args, **kwargs):
         return type("RT", (), {"text": "", "origin": "constant"})()
     def iter_existing_files(paths, *, recursive=True, include_hidden=False):
         for raw in paths:
@@ -893,26 +893,33 @@ def process_image_to_bytes(image_source: Path | Image.Image) -> Tuple[bytes, str
     """
     if HAS_PIL:
         if isinstance(image_source, Path):
-            img = Image.open(image_source)
             mime = mimetypes.guess_type(image_source.name)[0] or "image/png"
+            with Image.open(image_source) as source:
+                img = source.copy()
         else:
-            img = image_source
+            # Do not resize/convert a caller-owned clipboard image in place.
+            img = image_source.copy()
             mime = "image/png"
 
-        # Resize if needed
-        if max(img.size) > MAX_IMAGE_SIZE:
-            img.thumbnail((MAX_IMAGE_SIZE, MAX_IMAGE_SIZE), Image.Resampling.LANCZOS)
+        try:
+            # Resize if needed
+            if max(img.size) > MAX_IMAGE_SIZE:
+                img.thumbnail((MAX_IMAGE_SIZE, MAX_IMAGE_SIZE), Image.Resampling.LANCZOS)
 
-        # Convert to RGB if needed
-        if img.mode in ("RGBA", "P"):
-            img = img.convert("RGB")
+            # Convert to RGB if needed
+            if img.mode in ("RGBA", "P"):
+                converted = img.convert("RGB")
+                img.close()
+                img = converted
 
-        # Save to buffer
-        buffer = io.BytesIO()
-        fmt = "JPEG" if mime in ("image/jpeg", "image/jpg") else "PNG"
-        img.save(buffer, format=fmt)
-        actual_mime = "image/jpeg" if fmt == "JPEG" else "image/png"
-        return buffer.getvalue(), actual_mime
+            # Save to buffer
+            buffer = io.BytesIO()
+            fmt = "JPEG" if mime in ("image/jpeg", "image/jpg") else "PNG"
+            img.save(buffer, format=fmt)
+            actual_mime = "image/jpeg" if fmt == "JPEG" else "image/png"
+            return buffer.getvalue(), actual_mime
+        finally:
+            img.close()
     else:
         # Fallback without PIL
         if isinstance(image_source, Path):
@@ -997,11 +1004,15 @@ def extract_text_from_files(paths: Iterable[Path]) -> str:
         if p.suffix.lower() not in TEXT_EXTS:
             continue
         try:
-            content = p.read_text(encoding="utf-8", errors="replace")
+            # Read one extra character to detect truncation without loading a
+            # potentially multi-gigabyte log or generated file into memory.
+            with p.open("r", encoding="utf-8", errors="replace") as handle:
+                content = handle.read(TEXT_SIZE_MAX + 1)
             if len(content) > TEXT_SIZE_MAX:
                 content = (
                     content[:TEXT_SIZE_MAX]
-                    + f"\n... [TRUNCATED, {len(content)} total chars]"
+                    + f"\n... [TRUNCATED at {TEXT_SIZE_MAX} chars; "
+                    + f"file size {p.stat().st_size} bytes]"
                 )
             parts.append(f"[FILE CONTEXT: {p.name}]\n{content}")
             print(f"[+] Loaded text: {p}")

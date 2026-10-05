@@ -32,39 +32,64 @@ FORMAT_PRESETS = {
 # === SETTINGS END ===
 
 def constrain_resize(img: Image.Image, w_max, w_min, h_max, h_min) -> Image.Image:
-    """Resize image keeping aspect ratio, respecting min/max bounds.
+    """Resize while preserving aspect ratio and respecting feasible bounds.
 
-    Note: When both min constraints apply and cannot both be satisfied while
-    preserving aspect ratio, the larger scale factor takes precedence.
+    Minimum dimensions define a lower scale and maximum dimensions define an
+    upper scale.  If those ranges conflict, maximum dimensions win so a minimum
+    cannot unexpectedly create an enormous output image.
     """
     w, h = img.size
-    scale = 1.0
+    min_scale = max(
+        w_min / w if w_min is not None else 0.0,
+        h_min / h if h_min is not None else 0.0,
+    )
+    max_scale = min(
+        w_max / w if w_max is not None else math.inf,
+        h_max / h if h_max is not None else math.inf,
+    )
 
-    # Apply MAX constraints first (shrink if needed)
-    if w_max is not None:
-        scale = min(scale, w_max / w)
-    if h_max is not None:
-        scale = min(scale, h_max / h)
-
-    # Apply MIN constraints (grow if needed; max takes priority)
-    if w_min is not None and (w * scale) < w_min:
-        scale = max(scale, w_min / w)
-    if h_min is not None and (h * scale) < h_min:
-        scale = max(scale, h_min / h)
-
-    new_w = max(1, int(w * scale))
-    new_h = max(1, int(h * scale))
-
-    # Force minimum dimensions after rounding (single pass, no cascade)
-    if w_min is not None and new_w < w_min:
-        new_w = w_min
-    if h_min is not None and new_h < h_min:
-        new_h = h_min
+    # Keep the original size when it already lies in the feasible interval.
+    # In a conflicting interval, cap at the maximum rather than violating it.
+    scale = min(max(1.0, min_scale), max_scale)
+    new_w = max(1, round(w * scale))
+    new_h = max(1, round(h * scale))
 
     if (new_w, new_h) != (w, h):
         resample = Image.Resampling.LANCZOS if hasattr(Image, "Resampling") else Image.LANCZOS
         return img.resize((new_w, new_h), resample)
     return img
+
+
+def _positive_int(value: str) -> int:
+    number = int(value)
+    if number <= 0:
+        raise argparse.ArgumentTypeError("must be greater than zero")
+    return number
+
+
+def _nonnegative_int(value: str) -> int:
+    number = int(value)
+    if number < 0:
+        raise argparse.ArgumentTypeError("must be zero or greater")
+    return number
+
+
+def _alpha(value: str) -> int:
+    number = int(value)
+    if not 0 <= number <= 255:
+        raise argparse.ArgumentTypeError("must be between 0 and 255")
+    return number
+
+
+def _rgb(value: str) -> tuple[int, int, int]:
+    try:
+        components = tuple(int(component.strip()) for component in value.split(","))
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be R,G,B integers") from exc
+    if len(components) != 3 or any(component < 0 or component > 255 for component in components):
+        raise argparse.ArgumentTypeError("must contain three values between 0 and 255")
+    return components
+
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="Combine multiple images into a grid")
@@ -73,8 +98,8 @@ def parse_args(argv=None):
                         help="Input directory or file containing source images")
     parser.add_argument("-o", "--output", default=None,
                         help="Output file path (default: combined.<format> in input dir)")
-    parser.add_argument("--rows", type=int, default=g.get("ROWS", 2),
-                        help="Number of rows in grid")
+    parser.add_argument("--rows", type=_positive_int, default=g.get("ROWS", 2),
+                        help="Number of rows in grid (must be positive)")
     parser.add_argument("--cols", type=int, default=g.get("COLS", -1),
                         help="Number of columns, non-positive to auto-calculate")
     parser.add_argument("--arrange", default=g.get("ARRANGE_ORDER", "leftToRight"),
@@ -92,12 +117,14 @@ def parse_args(argv=None):
     parser.add_argument("--img-h-min", type=int, default=g.get("IMAGE_H_MIN", -1),
                         help="Min image height, non-positive to disable")
     parser.add_argument("--format", default=g.get("OUTPUT_FORMAT", "avif"),
-                        help="Output format key from FORMAT_PRESETS")
-    parser.add_argument("--pad", type=int, default=g.get("CELL_PADDING", 2),
-                        help="Cell padding in pixels")
-    parser.add_argument("--bg", default="255,255,255",
+                        choices=sorted(FORMAT_PRESETS),
+                        help="Output format")
+    parser.add_argument("--pad", type=_nonnegative_int, default=g.get("CELL_PADDING", 2),
+                        help="Cell padding in pixels (must be non-negative)")
+    default_bg = g.get("BACKGROUND_COLOR", (255, 255, 255, 0))
+    parser.add_argument("--bg", type=_rgb, default=tuple(default_bg[:3]),
                         help="Background color R,G,B")
-    parser.add_argument("--alpha", type=int, default=0,
+    parser.add_argument("--alpha", type=_alpha, default=default_bg[3],
                         help="Alpha channel 0-255")
     return parser.parse_args(argv)
 
@@ -108,7 +135,7 @@ def main(argv=None):
     args = parse_args(argv)
 
     ROWS = args.rows
-    COLS = None if args.cols == -1 else args.cols
+    COLS = None if args.cols <= 0 else args.cols
     ARRANGE_ORDER = args.arrange
     SORT_BY = args.sort
     IMAGE_W_MAX = None if args.img_w_max <= 0 else args.img_w_max
@@ -117,7 +144,7 @@ def main(argv=None):
     IMAGE_H_MIN = None if args.img_h_min <= 0 else args.img_h_min
     OUTPUT_FORMAT = args.format
     CELL_PADDING = args.pad
-    BACKGROUND_COLOR = (*tuple(int(v) for v in args.bg.split(",")), args.alpha)
+    BACKGROUND_COLOR = (*args.bg, args.alpha)
 
     resolved = resolve_paths(
         args,
@@ -144,14 +171,14 @@ def main(argv=None):
         overwrite=OVERWRITE,
     )
 
-    output_filename = out_path.name
+    output_path_resolved = out_path.resolve()
 
     valid_exts = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tiff", ".tif", ".avif", ".jxl", ".heic", ".heif", ".svg"}
     all_files = [
         f for f in iter_existing_files(resolved.paths, recursive=True)
         if f.suffix.lower() in valid_exts
     ]
-    files = [f for f in all_files if f.name != output_filename]
+    files = [f for f in all_files if f.resolve() != output_path_resolved]
     
     if SORT_BY == "NAME":
         files.sort()
@@ -168,9 +195,14 @@ def main(argv=None):
     images = []
     for f in files:
         try:
-            img = Image.open(f).convert("RGBA")
-            img = constrain_resize(img, IMAGE_W_MAX, IMAGE_W_MIN, IMAGE_H_MAX, IMAGE_H_MIN)
-            images.append(img)
+            with Image.open(f) as source:
+                img = source.convert("RGBA")
+            resized = constrain_resize(
+                img, IMAGE_W_MAX, IMAGE_W_MIN, IMAGE_H_MAX, IMAGE_H_MIN
+            )
+            if resized is not img:
+                img.close()
+            images.append(resized)
         except Exception as e:
             print(f"⚠️ Skipping {f.name}: {e}")
 
@@ -213,18 +245,33 @@ def main(argv=None):
     canvas_w = sum(col_widths) + (cols - 1) * CELL_PADDING
     canvas_h = sum(row_heights) + (rows - 1) * CELL_PADDING
 
-    # 6. Create Canvas & Paste
+    # 6. Create Canvas & Paste. Prefix offsets avoid repeatedly summing slices
+    # for every cell in large grids.
+    col_offsets = []
+    offset = 0
+    for width in col_widths:
+        col_offsets.append(offset)
+        offset += width + CELL_PADDING
+
+    row_offsets = []
+    offset = 0
+    for height in row_heights:
+        row_offsets.append(offset)
+        offset += height + CELL_PADDING
+
     canvas = Image.new("RGBA", (canvas_w, canvas_h), BACKGROUND_COLOR)
+    try:
+        for r in range(rows):
+            for c in range(cols):
+                if (img := grid[r][c]) is not None:
+                    canvas.paste(img, (col_offsets[c], row_offsets[r]), img)
 
-    for r in range(rows):
-        for c in range(cols):
-            if (img := grid[r][c]) is not None:
-                x = sum(col_widths[:c]) + c * CELL_PADDING
-                y = sum(row_heights[:r]) + r * CELL_PADDING
-                canvas.paste(img, (x, y), img)
-
-    save_kwargs = FORMAT_PRESETS.get(OUTPUT_FORMAT, {})
-    canvas.save(str(out_path), OUTPUT_FORMAT, **save_kwargs)
+        save_kwargs = FORMAT_PRESETS[OUTPUT_FORMAT]
+        canvas.save(str(out_path), OUTPUT_FORMAT, **save_kwargs)
+    finally:
+        canvas.close()
+        for img in images:
+            img.close()
 
     print(f"✅ Successfully saved to {out_path} ({canvas_w}x{canvas_h}px)")
 
