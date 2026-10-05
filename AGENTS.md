@@ -7,6 +7,8 @@ do not edit content of /_standalone_dst_do_not_edit/
 
 if script need path or clipboard as command argument - make it compatible with /path_args/command_paths.py
 
+in tasks to make new script important to implement similar way as other scripts to be integrated in project
+
 ## Lint/Check Commands
 - `python -m py_compile <file>` - syntax check
 - `python -m ruff check <file>` - linting (if ruff installed)

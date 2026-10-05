@@ -31,6 +31,7 @@ So by default it will create files in folder where you put the script.
 | `new_HTLM_from_clipboard` | You copy text from web page. Script save formatted HTML. Similar to justpaste.it CSS usually lost. |
 | `combine_img` | Combine multiple images into a grid layout e.g. 3 columns, or 1 row or fill best. choose size, auto-size, sort by name or time. |
 | `new_animated_webP_from_files` | Create an animated WebP from image files (copied/selected or passed as args). Frames of existing animated WebP inputs are preserved as-is via `webpmux`; without them Pillow alone is enough. |
+| `new_disk_from_files` | Create a disk image (iso, FAT32 img, fixed vhd, or vhdx) from files/folders. Detects what your system can create and asks which format; missing Python libraries can be pip-installed right from the menu. Always checks free space; asks for confirmation when inputs exceed 1 GiB. |
 | `new_img` | Create numbered placeholder color images with grid overlay. Useful for UI mockups and testing. |
 | `new_audio` | Generate sine wave audio files, choose req, notes or pentatonic scale quantization. wav, opus. |
 | `new_audio_sweep` | Generate frequency sweep audio files. Can quantize to pentatonic scale. |
@@ -68,6 +69,9 @@ All scripts should use exactly same `command_paths.py` to get and resolve file l
 - Optional: `webpmux` (libwebp binary) - only to preserve frames of animated WebP inputs (new_animated_webP_from_files)
 - Optional: `pytttsx3` - for voice generation (new_voice)
 - Optional: `numpy`, `pydub` - for audio sweep generation (new_audio_sweep)
+- Optional: `pycdlib` - for ISO creation (new_disk_from_files); alternatively `xorriso`/`genisoimage`/`mkisofs` binary
+- Optional: `pyfatfs` - for FAT32 img/vhd/vhdx creation (new_disk_from_files)
+- Optional: `qemu-img` (qemu-utils) - only for vhdx conversion (new_disk_from_files)
 
 ## License
 
