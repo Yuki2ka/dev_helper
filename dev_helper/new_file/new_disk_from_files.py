@@ -31,7 +31,7 @@ Free space on the destination drive is always checked first. If the input
 files are bigger than ASK_BIG_MB (1 GiB by default) the script asks for
 confirmation before creating anything.
 
-Output: new_disk_<timestamp>.<format> next to the first input file
+Output: new_disk_<timestamp>.<format> next to this script
 (or to the exact path given with -o).
 """
 
@@ -618,8 +618,7 @@ def main(argv=None):
     if args.output:
         out_location = Path(args.output)
     else:
-        first = resolved.first
-        out_location = first if first.is_dir() else first.parent
+        out_location = _resolved.parent
 
     out_path = choose_output_file(
         location=out_location,
