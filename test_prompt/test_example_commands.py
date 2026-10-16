@@ -43,6 +43,13 @@ def mock_stdin(text: str | None):
         sys.stdin.isatty = old_isatty
 
 
+class WindowsPathLiteralTests(unittest.TestCase):
+    def test_path_cleanup_does_not_decode_backslash_escapes(self) -> None:
+        pasted_path = r"D:\folder\new\file.mp3"
+        self.assertEqual(command_paths._clean_path_string(pasted_path), pasted_path)
+        self.assertEqual(command_paths._clean_path_string(f'"{pasted_path}"'), pasted_path)
+
+
 class ExampleCommandResolutionTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()

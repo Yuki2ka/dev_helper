@@ -12,6 +12,10 @@ Use `command_paths.py` in every command module. It gives one resolution chain:
 
 Directories are created by the resolver according to a generic `create` mode. The resolver does **not** know whether the command is a reader or a writer.
 
+Path values are treated literally; the resolver does not decode Python-style backslash escapes.
+A Windows path such as `D:\folder\file.mp3` passed through the CLI or clipboard is kept as-is.
+When hardcoding a Windows path in a `.py` settings constant, use a raw string, e.g. `r"D:\folder\file.mp3"` (or double every backslash).
+
 ## Input text resolution order
 
 For commands that need *text content* (not file paths):

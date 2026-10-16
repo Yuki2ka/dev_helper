@@ -9,8 +9,9 @@ No models or executables are downloaded automatically.
 
 # === SETTINGS START ===
 PATH = None
-MODEL = "D:\LLM_software\audiocpp\models\Qwen3-ASR-1.7B-GGUF\qwen3-asr-1.7b-q8_0.gguf" # Local audio.cpp-compatible GGUF file or dir
-AUDIOCPP_CLI = "D:\LLM_software\audiocpp\audiocpp_cli.exe"  # Executable path, next to script, or on PATH
+# When hardcoding a Windows path in Python, use a raw string: r"D:\folder\file.mp3".
+MODEL = r"D:\LLM_software\audiocpp\models\Qwen3-ASR-1.7B-GGUF\qwen3-asr-1.7b-q8_0.gguf"  # Local audio.cpp-compatible GGUF file or dir
+AUDIOCPP_CLI = r"D:\LLM_software\audiocpp\audiocpp_cli.exe"  # Executable path, next to script, or on PATH
 FFMPEG = "ffmpeg"
 BACKEND = "cuda"             # cpu, cuda, vulkan, metal, best
 LANGUAGE = None             # None = automatic; e.g. English
@@ -35,6 +36,8 @@ from path_args import iter_existing_files, resolve_paths
 AUDIO_EXTENSIONS = {
     ".wav", ".wave", ".mp3", ".flac", ".ogg", ".opus", ".m4a", ".aac",
     ".wma", ".aiff", ".aif", ".aifc", ".alac", ".amr", ".mka", ".weba",
+    # 3GPP audio/video containers are decoded by FFmpeg to the temporary WAV.
+    ".3gp", ".3gpp", ".3ga", ".3g2", ".3gp2",
 }
 
 
@@ -93,6 +96,29 @@ def is_ready_wav(path):
         return False
 
 
+def configure_utf8_console():
+    """Use UTF-8 in Windows consoles so native CLI Unicode output displays correctly."""
+    if sys.platform != "win32":
+        return
+
+    # C/C++ subprocesses inherit the console code page, independently of Python's
+    # own stream encoding. This is best-effort because stdout may be redirected.
+    try:
+        import ctypes
+
+        ctypes.windll.kernel32.SetConsoleOutputCP(65001)
+    except (AttributeError, OSError):  # pragma: no cover - Windows-only fallback
+        pass
+
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            try:
+                reconfigure(encoding="utf-8", errors="replace")
+            except (OSError, ValueError):  # pragma: no cover - unsupported/redirected stream
+                pass
+
+
 def run_command(command):
     # Logs stay out of the transcript. Inherit stdout/stderr for progress/errors.
     result = subprocess.run(command, stdin=subprocess.DEVNULL, check=False)
@@ -140,6 +166,7 @@ def transcribe(source, target, args, cli, model):
 
 
 def main(argv=None):
+    configure_utf8_console()
     args = parse_args(argv)
     paths = list(resolve_paths(args, arg_names=("paths",), constant=PATH,
                                fallback_to_cwd=True, create="none"))

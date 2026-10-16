@@ -91,10 +91,15 @@ Setup:
    another runtime are not necessarily compatible. See upstream's
    [Qwen3 GGUF guide](https://github.com/0xShug0/audio.cpp/blob/main/docs/models/qwen3.md#gguf-checkpoints).
    Pass its path with `--model`, set `QWEN3_ASR_MODEL`, or edit `MODEL` in settings.
-3. Install FFmpeg for MP3, FLAC, Ogg/Opus, M4A, AAC, and other compressed audio
-   (also for WAV that is not mono 16 kHz PCM16). Use PATH or `--ffmpeg`.
-   Already-compatible WAV needs no FFmpeg. No extra Python packages are required
-   for transcription; clipboard support uses the project's usual optional helpers.
+   CLI/clipboard paths are passed literally. In Python settings, write Windows paths
+   as raw strings (for example `r"D:\models\model.gguf"`) so `\` sequences are not
+   interpreted by Python.
+3. Install FFmpeg for MP3, FLAC, Ogg/Opus, M4A, AAC, 3GPP (`.3gp`, `.3gpp`,
+   `.3ga`), and other compressed audio (also for WAV that is not mono 16 kHz PCM16).
+   Inputs that need conversion are decoded to a temporary mono 16 kHz PCM WAV.
+   Use PATH or `--ffmpeg`. Already-compatible WAV needs no FFmpeg. No extra Python
+   packages are required for transcription; clipboard support uses the project's
+   usual optional helpers.
 
 ```bash
 python dev_helper/new_file/new_txt_from_audio.py recording.wav --model /models/qwen3-asr-1.7b.gguf

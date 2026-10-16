@@ -635,6 +635,8 @@ def _lines_to_path_strings(text: str | None) -> list[str]:
 
 
 def _clean_path_string(value: str) -> str:
+    # Paths are literal input, not Python source: never decode backslash escapes.
+    # In a Python source literal, ``\f`` is a form feed; do not decode path input here.
     return value.strip().strip('"\'')
 
 
