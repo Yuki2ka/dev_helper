@@ -33,6 +33,7 @@ new_img = "new_file.new_img:main"
 new_animated_webP_from_files = "new_file.new_animated_webP_from_files:main"
 combine_img = "new_file.combine_img:main"
 new_voice = "new_file.new_voice:main"
+new_txt_from_audio = "new_file.new_txt_from_audio:main"
 new_file_from_LLM = "new_file.new_file_from_LLM:main"
 open_file_via_http = "view.open_file_via_http:main"
 
