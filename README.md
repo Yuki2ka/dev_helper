@@ -94,12 +94,16 @@ Setup:
    CLI/clipboard paths are passed literally. In Python settings, write Windows paths
    as raw strings (for example `r"D:\models\model.gguf"`) so `\` sequences are not
    interpreted by Python.
-3. Install FFmpeg for MP3, FLAC, Ogg/Opus, M4A, AAC, 3GPP (`.3gp`, `.3gpp`,
-   `.3ga`), and other compressed audio (also for WAV that is not mono 16 kHz PCM16).
-   Inputs that need conversion are decoded to a temporary mono 16 kHz PCM WAV.
-   Use PATH or `--ffmpeg`. Already-compatible WAV needs no FFmpeg. No extra Python
-   packages are required for transcription; clipboard support uses the project's
-   usual optional helpers.
+3. Install FFmpeg for MP3, FLAC, Ogg/Opus, M4A, AAC, MPEG-1/2 audio (`.mp1`,
+   `.mp2`, `.mpa`, `.m2a`, `.mpga`), MPEG containers (`.mpeg`, `.mpg`,
+   `.mpeg2`, `.mpg2`), 3GPP (`.3gp`, `.3gpp`, `.3ga`), and other compressed
+   audio (also for WAV that is not mono 16 kHz PCM16, e.g. WAV with an MPEG
+   codec inside). Inputs that need conversion are decoded to a temporary mono
+   16 kHz PCM WAV. Files with unknown or no extension are recognized by their
+   content signature (WAVE/RIFF, MPEG audio or streams, MP4/M4A, Ogg, FLAC,
+   AIFF, WMA, AMR, ...). Use PATH or `--ffmpeg`. Already-compatible WAV needs
+   no FFmpeg. No extra Python packages are required for transcription;
+   clipboard support uses the project's usual optional helpers.
 
 ```bash
 python dev_helper/new_file/new_txt_from_audio.py recording.wav --model /models/qwen3-asr-1.7b.gguf
