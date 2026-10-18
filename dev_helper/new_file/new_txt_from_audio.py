@@ -1,10 +1,17 @@
 #!/usr/bin/env python3
-"""Create adjacent UTF-8 transcripts using audio.cpp's Qwen3-ASR CLI.
+"""Create adjacent UTF-8 transcripts using https://github.com/0xShug0/audio.cpp Qwen3-ASR CLI.
 
 Inputs: CLI paths -> stdin -> clipboard file references -> PATH -> cwd.
 Requires an audio.cpp-compatible Qwen3-ASR-1.7B GGUF and audiocpp_cli.
 FFmpeg is needed unless input is already mono 16 kHz PCM16 WAV.
-No models or executables are downloaded automatically.
+
+
+```bash
+python dev_helper/new_file/new_txt_from_audio.py recording.wav --model /models/qwen3-asr-1.7b.gguf
+python dev_helper/new_file/new_txt_from_audio.py /recordings --model /models/qwen3-asr-1.7b.gguf --backend cuda
+python dev_helper/new_file/new_txt_from_audio.py --language English
+```
+
 """
 
 # === SETTINGS START ===
