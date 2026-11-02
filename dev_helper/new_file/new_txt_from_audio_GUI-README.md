@@ -1,12 +1,12 @@
 # Text from audio — companion editor
 
 `new_txt_from_audio_GUI.py` is a Tkinter front end for turning a folder of
-audio files into companion `.txt` transcripts, and for reviewing them while
-the audio plays.
+audio files (or one file at a time) into companion `.txt` transcripts, and
+for reviewing them while the audio plays.
 
 ```
 +-- audio folder ------------------------------------------------+
-|  Open folder...            [audio file list]     |  song.txt  |
+|  [Open folder...] [Open file...]  [ ] Subfolders |  song.txt  |
 |  filter: [........]                              |  editor    |
 |  song.mp3        check  3.1 MB                   |            |
 |  notes.m4a              1.2 MB                   |  Ctrl+click|
@@ -23,11 +23,38 @@ the audio plays.
 ## Run
 
 ```
-python new_txt_from_audio_GUI.py [folder]
+python new_txt_from_audio_GUI.py [folder-or-file]
 ```
 
-The folder argument is optional; without it the GUI starts in its own
-folder and waits for **Open folder...**.
+The argument is optional and may be a folder or a single audio file, like
+the console script. Without it the GUI reopens the last folder you used
+(saved per user) and otherwise starts in its own folder and waits for
+**Open folder...**.
+
+## Supported files
+
+The list and the **Open file...** dialog use the same extension set as
+`new_txt_from_audio.py`, plus the same content sniffing, so a file the
+console script would transcribe is never hidden here:
+
+| Group | Extensions |
+| --- | --- |
+| Common | `.wav` `.wave` `.mp3` `.m4a` `.m4b` `.aac` `.flac` `.ogg` `.oga` `.opus` `.weba` `.webm` `.wma` `.aiff` `.aif` `.aifc` `.alac` `.amr` `.mka` `.mp4` `.m4v` |
+| MPEG audio | `.mp1` `.mp2` `.mpa` `.m2a` `.mpga` `.adts` |
+| MPEG program streams (audio track only) | `.mpeg` `.mpg` `.mpeg2` `.mpg2` |
+| 3GPP phone recordings | `.3gp` `.3gpp` `.3ga` `.3g2` `.3gp2` |
+
+Files without a known extension are checked by their first bytes (RIFF/WAVE,
+FLAC, Ogg, AIFF, AMR, ASF, MPEG/MP3/ADTS, MP4/M4A/3GP brands), exactly like
+the console script. **Open file...** also accepts any file through *All
+files*; a file that does not look like audio asks for confirmation first.
+
+`test_prompt/test_new_txt_from_audio_gui.py` asserts that the GUI extension
+set stays a superset of the console one, so the two cannot drift apart
+silently.
+
+**Subfolders** (off by default) scans recursively and shows the relative
+path of every hit; the transcriber button respects the same switch.
 
 No third-party package is needed to edit text. Audio playback uses the
 first backend that is available:
@@ -52,7 +79,8 @@ sync editor still work; only playback is disabled.
 
 Every audio file maps to `<audio name>.txt` in the same folder, so
 `song.mp3` -> `song.txt`. A green check in the list marks audio files that
-already have their text.
+already have their text; the **sync** column shows a dot when a
+`<name>.sync.json` already exists, so aligned files are easy to spot.
 
 **Run new_txt_from_audio.py** executes the sibling script
 `new_txt_from_audio.py` (override by locating it in the file dialog if it
@@ -93,12 +121,16 @@ imported as sync marks as soon as the text is loaded.
    the audio plays; marks are shown with a light blue background.
 5. **Ctrl+right-click** a word to delete its mark, **Clear marks** to
    start over.
+6. **Double-click** a pinned word to jump the audio to its mark.
+7. **Ctrl+Shift+click** pins a word and immediately runs **Fill from
+   marks**, so a few anchors are enough to line up a whole file.
 
 Notes:
 
 * A human presses slightly after hearing the word, so the time of a live
-  Ctrl+click is reduced by `CTRL_CLICK_LEAD_SECONDS` (default 0.25 s).
-  Set it to `0` if you do not want the compensation.
+  Ctrl+click is reduced by the **Ctrl+click reaction** spinbox (default
+  `CTRL_CLICK_LEAD_SECONDS` = 0.25 s, stored per user). Set it to `0` for
+  the raw playback time; negative values add time instead of removing it.
 * Marks are Tk text marks, so they move with their word when you edit or
   insert text during the session. Offsets are written to disk on save.
 * **Follow playback** (on by default) scrolls the editor to the current
@@ -129,9 +161,22 @@ mark is removed, so it is safe to version next to the text.
 
 ### Automatic timings
 
-* **Auto-estimate** spreads marks over the whole file, weighted by word
-  length (a lead-in and tail are left out). It is a usable starting point
-  for sentence-level highlighting but is not real alignment.
+* **Auto-estimate** first asks FFmpeg (`silencedetect`) where speech runs
+  and where the pauses are, then spreads the words over the speech only,
+  weighted by word length and punctuation pauses. Long silences therefore
+  no longer swallow words, which makes this a useful first pass on
+  dictation and recordings with gaps. Without FFmpeg it falls back to
+  spreading words over the whole file. The run happens in a worker thread,
+  so the GUI keeps playing while it works.
+* **Fill from marks** (`Ctrl+R`) keeps every mark you pinned as a fixed
+  anchor and spreads all remaining words between the anchors, using the
+  same weights. Two or three Ctrl+clicks near the start, middle and end are
+  usually enough for a smooth karaoke track; no anchor is ever moved.
+* **Auto-align on load** (off by default) runs that same estimate in the
+  background whenever a text file is opened and has no marks yet, so a
+  freshly transcribed file already follows the audio without a click. It
+  never replaces existing marks and is skipped when the duration is
+  unknown.
 * **Import timings...** reads whisper-style JSON (`segments[].words[]`,
   `word_segments`, faster-whisper/whisper-timestamped/stable-ts output),
   SRT and WebVTT. Timed words are matched against the text in order, so
@@ -144,12 +189,17 @@ mark is removed, so it is safe to version next to the text.
 ## Automatic alignment — what is realistic
 
 The manual gesture above is the only method that is always correct without
-extra models, but it is also the slowest for long files. The options that
-were evaluated:
+extra models, but it is also the slowest for long files. The GUI therefore
+combines it with two cheap aids: **Auto-estimate** uses FFmpeg
+`silencedetect` to place words only inside speech runs, and **Fill from
+marks** (or `Ctrl+Shift+click`) interpolates every word between the marks
+you pinned. Neither needs a model, and both are instant to re-run after a
+few corrections. The heavier options that were evaluated:
 
 | Approach | Granularity | Extra requirements | Effort | Verdict |
 | --- | --- | --- | --- | --- |
 | Manual Ctrl+click + proportional estimate (implemented) | word / segment | none | done | reliable baseline, edits instantly |
+| FFmpeg `silencedetect` speech runs + weighted spread, and anchor interpolation from a few manual marks (implemented) | word | `ffmpeg` on PATH | done | no model, skips pauses, minutes of work per file instead of hours |
 | Word timestamps from the transcriber (Whisper `word_timestamps`, faster-whisper, whisper.cpp `-ml 1 --output-json-full`, whisper-timestamped, stable-ts) | word | the model already used for transcription | low: write a JSON sidecar | **best first step** if the transcriber uses Whisper |
 | WhisperX (VAD + wav2vec2 forced alignment) | word | torch, wav2vec2 model, several hundred MB | medium | excellent accuracy, heavier install |
 | stable-ts `align()` / `whisper-timestamped` alignment of known text | word | Whisper model | medium | good when the text is already correct |
@@ -182,7 +232,8 @@ Things that decide the choice:
   often reads well and needs no new dependency.
 
 Suggested next step: make `new_txt_from_audio.py` write word timings when
-its backend supports them, e.g.
+its backend supports them; that remains the most accurate option and the
+GUI imports such a sidecar automatically. Example:
 
 ```python
 # faster-whisper
@@ -210,14 +261,26 @@ is the practical path.
 | --- | --- |
 | `TRANSCRIBER_SCRIPT` | Path of `new_txt_from_audio.py` |
 | `TRANSCRIBER_ARGS` | Arguments passed to it (`{audio}`, `{folder}`, `{out}`) |
-| `CTRL_CLICK_LEAD_SECONDS` | Reaction compensation for manual marks |
+| `CTRL_CLICK_LEAD_SECONDS` | Default reaction compensation for manual marks |
 | `ESTIMATE_LEAD_SECONDS` / `ESTIMATE_TAIL_SECONDS` | Estimate margins |
-| `AUDIO_EXTENSIONS` | Files shown in the list |
+| `AUDIO_EXTENSIONS` | Files shown in the list (kept in sync with the console) |
+| `AUDIO_EXTENSION_GROUPS` | Groups offered by the file dialog |
+| `SPEECH_ALIGNMENT` / `SPEECH_NOISE_DB` / `SPEECH_MIN_SILENCE_SECONDS` | FFmpeg silencedetect tuning for the automatic estimate |
+| `ANCHOR_TAG_LIMIT` | Above this many marks the anchor background is skipped (the karaoke highlight stays) |
 | `POLL_INTERVAL_MS` | Refresh rate of the clock and highlight |
 
-Keyboard shortcuts: `Ctrl+O` open folder, `Ctrl+S` save text,
-`Ctrl+Space` play/pause, `Ctrl+click` add sync mark,
+Keyboard shortcuts: `Ctrl+O` open folder, `Ctrl+Shift+O` open an audio
+file, `Ctrl+S` save text, `Ctrl+R` fill from marks, `Ctrl+Space`
+play/pause, `Ctrl+click` add sync mark, `Ctrl+Shift+click` add and fill,
 `Ctrl+right-click` remove sync mark.
+
+Settings (last folder, reaction time, follow playback, subfolders,
+auto-align on load) are
+stored per user: `%APPDATA%/new_txt_from_audio_GUI/settings.json` on
+Windows, `~/Library/Application Support/new_txt_from_audio_GUI/` on macOS
+and `$XDG_CONFIG_HOME/new_txt_from_audio_GUI/` (or `~/.config/...`) on
+Linux. Set `NEW_TXT_FROM_AUDIO_GUI_SETTINGS` to any file path to override
+it, for example to keep the settings on the same SD card as the scripts.
 
 ## Limitations
 
@@ -231,5 +294,8 @@ Keyboard shortcuts: `Ctrl+O` open folder, `Ctrl+S` save text,
 * Sync offsets are character positions: if the text is regenerated and
   re-wrapped, old offsets may point at the wrong words. Re-import/estimate
   in that case.
-* The GUI assumes one text file per audio file, in the same folder, and
-  does not recurse into subfolders.
+* The GUI assumes one text file per audio file, next to it. Subfolders are
+  optional; the companion text is always written beside its audio file.
+* The speech-aware estimate needs `ffmpeg` on `PATH`; without it the
+  estimate is word-length based only. It is still an estimate: it knows
+  where speech happens, not which word is spoken.

@@ -3,8 +3,9 @@
 Layout
 ------
 Left pane
-    * Open folder and a filtered list of audio files; a green check marks
-      audio files whose companion ``<name>.txt`` already exists.
+    * Open folder (optionally with subfolders) or a single audio file, and
+      a filtered list of audio files; a green check marks audio files whose
+      companion ``<name>.txt`` already exists.
     * Playback: play/pause, -10 s, stop, progress slider and clock.
     * A button that runs the sibling ``new_txt_from_audio.py`` for the
       selected file (or for every file that has no text yet), with a live
@@ -16,6 +17,10 @@ Right pane
       that word to the current position. During playback the word that
       belongs to the current position is highlighted. Marks are saved in
       ``<name>.sync.json`` next to the audio.
+
+The file list, the Open dialog and the accepts-everything fallback use the
+same extension set as the console script ``new_txt_from_audio.py`` (plus
+content sniffing), so every file the console accepts is also listed here.
 
 Playback needs no third-party package: pygame is used when available
 (best seeking), otherwise a platform player (Windows MCI, afplay on
@@ -74,15 +79,46 @@ TRANSCRIBER_SCRIPT = APP_DIR / "new_txt_from_audio.py"
 # that. Use [] if the script only scans its own folder.
 TRANSCRIBER_ARGS = ["{audio}"]
 
+# Kept in sync with new_txt_from_audio.py (AUDIO_EXTENSIONS): the test suite
+# asserts that this set is a superset, so the GUI can never hide a file the
+# console script would transcribe.
 AUDIO_EXTENSIONS = {
-    ".wav", ".mp3", ".m4a", ".aac", ".flac", ".ogg", ".oga", ".opus",
-    ".wma", ".aiff", ".aif", ".mp4", ".m4v", ".webm",
+    # Core audio containers produced or accepted by common recorders.
+    ".wav", ".wave", ".mp3", ".m4a", ".m4b", ".aac", ".flac", ".ogg",
+    ".oga", ".opus", ".weba", ".webm", ".wma", ".aiff", ".aif", ".aifc",
+    ".alac", ".amr", ".mka", ".mp4", ".m4v",
+    # MPEG-1/2 audio streams ("mpeg2 internally"), e.g. dictation recorders.
+    ".mp1", ".mp2", ".mpa", ".m2a", ".mpga", ".adts",
+    # MPEG-1/2 audio/video containers; FFmpeg -vn keeps just the audio track.
+    ".mpeg", ".mpg", ".mpeg2", ".mpg2",
+    # 3GPP audio/video containers are decoded by FFmpeg as well.
+    ".3gp", ".3gpp", ".3ga", ".3g2", ".3gp2",
 }
+
+COMMON_AUDIO_EXTENSIONS = (
+    ".wav", ".mp3", ".m4a", ".flac", ".ogg", ".opus", ".wma", ".aiff", ".aac",
+)
+
+# Groups for the file dialog. Every entry is filtered against
+# AUDIO_EXTENSIONS, so a group can never offer an unsupported extension.
+AUDIO_EXTENSION_GROUPS = (
+    ("Common audio", COMMON_AUDIO_EXTENSIONS),
+    ("MP3 and MPEG audio", (".mp3", ".mp1", ".mp2", ".mpa", ".m2a", ".mpga",
+                            ".adts", ".mpeg", ".mpg", ".mpeg2", ".mpg2")),
+    ("MP4 / AAC / video with audio", (".m4a", ".m4b", ".mp4", ".m4v", ".aac",
+                                      ".webm", ".weba", ".mka")),
+    ("3GPP phone recordings", (".3gp", ".3gpp", ".3ga", ".3g2", ".3gp2",
+                               ".amr")),
+    ("Lossless", (".wav", ".wave", ".flac", ".aiff", ".aif", ".aifc",
+                  ".alac", ".wma", ".ogg", ".oga")),
+)
+
 TEXT_SUFFIX = ".txt"
 SYNC_SUFFIX = ".sync.json"
 
 # Humans press Ctrl slightly after hearing the word start. Subtracting this
 # lead makes manual marks line up better with the audio. Set to 0 to disable.
+# The value can be tuned at runtime with the spinbox above the sync buttons.
 CTRL_CLICK_LEAD_SECONDS = 0.25
 
 # Rough automatic timing: first word starts after LEAD, last word ends
@@ -90,12 +126,27 @@ CTRL_CLICK_LEAD_SECONDS = 0.25
 ESTIMATE_LEAD_SECONDS = 0.30
 ESTIMATE_TAIL_SECONDS = 0.50
 
+# Automatic estimate uses FFmpeg silencedetect to find the speech runs, so
+# long pauses do not eat words. Without FFmpeg the uniform spread is used.
+SPEECH_ALIGNMENT = True
+SPEECH_NOISE_DB = -35
+SPEECH_MIN_SILENCE_SECONDS = 0.35
+SPEECH_MIN_SEGMENT_SECONDS = 0.08
+SPEECH_MERGE_GAP_SECONDS = 0.25
+
+# Extra weight (in characters) for the pause that punctuation implies.
+PAUSE_WEIGHTS = {",": 2.0, ";": 3.0, ":": 3.0, ".": 4.0, "!": 4.0,
+                 "?": 4.0, "\u2026": 5.0}
+
 POLL_INTERVAL_MS = 120
 
 COLOR_ACCENT = "#6c5ce7"
 COLOR_OK = "#0a7d32"
 COLOR_MUTED = "#666666"
 COLOR_HIGHLIGHT = "#ffe680"
+# Above this many marks the anchor background would paint the whole editor,
+# so only the karaoke highlight is drawn.
+ANCHOR_TAG_LIMIT = 400
 COLOR_ANCHOR = "#cfe3ff"
 
 NO_ENGINE_MESSAGE = (
@@ -185,16 +236,208 @@ def companion_path(audio_path, suffix):
     return audio_path.with_name(audio_path.stem + suffix)
 
 
-def scan_audio(folder):
-    folder = Path(folder)
-    try:
-        entries = sorted(folder.iterdir(), key=lambda item: item.name.lower())
-    except OSError:
-        return []
+def natural_key(value):
+    """Sort key that puts 'track2' before 'track10'."""
     return [
-        entry for entry in entries
-        if entry.is_file() and entry.suffix.lower() in AUDIO_EXTENSIONS
+        (0, int(chunk)) if chunk.isdigit() else (1, chunk.lower())
+        for chunk in re.split(r"(\d+)", str(value)) if chunk
     ]
+
+
+def has_audio_signature(path):
+    """Content sniff for audio recordings whose name lacks a known extension.
+
+    Mirrors new_txt_from_audio.has_audio_signature, so the list also shows
+    files the console script would accept (recorders sometimes drop the
+    extension). The first 16 bytes are enough for every container here.
+    """
+    try:
+        with open(path, "rb") as handle:
+            head = handle.read(16)
+    except OSError:
+        return False
+    if len(head) < 4:
+        return False
+    # WAVE container: RIFF/RIFX/rf64 + "WAVE". Inner codec may be PCM, MPEG, ...
+    if head[8:12] == b"WAVE" and head[:4] in (b"RIFF", b"RIFX", b"rf64"):
+        return True
+    if head[:4] in (b"fLaC", b"OggS", b".snd", b"MAC ", b"wvpk", b"TTA1"):
+        return True
+    if head[:4] == b"FORM" and head[8:12] in (b"AIFF", b"AIFC"):
+        return True
+    if head[:4] == b"#!AM":  # #!AMR or #!AMR-WB
+        return True
+    if head[:8] == bytes.fromhex("3026b2758e66cf11"):  # ASF: wma/wmv
+        return True
+    if head[:8] == bytes.fromhex("3666666611cf11a0"):  # Sony Wave64
+        return True
+    # MP4-family audio (M4A/M4B) and 3GPP brands; video-only brands are skipped.
+    if head[4:8] == b"ftyp" and (head[8:12] in (b"M4A ", b"M4B ", b"M4P ")
+                                 or head[8:12][:2] == b"3g"):
+        return True
+    if head[:3] == b"ID3":  # tagged MP3 (possibly with MPEG-2 audio)
+        return True
+    if head[0] == 0xFF and (head[1] & 0xF0) == 0xF0:
+        return True  # MPEG audio (MP1/MP2/MP3) or ADTS AAC frame sync
+    if head[:3] == b"\x00\x00\x01":
+        return True  # MPEG program / elementary stream start code
+    return False
+
+
+def looks_like_audio(path):
+    """True when the extension or the first bytes say this is audio."""
+    path = Path(path)
+    return path.suffix.lower() in AUDIO_EXTENSIONS or has_audio_signature(path)
+
+
+def _walk_audio(folder, recursive, found, seen):
+    try:
+        key = os.path.normcase(str(Path(folder).resolve()))
+    except OSError:
+        key = os.path.normcase(str(folder))
+    if key in seen:          # symlink or junction loop
+        return
+    seen.add(key)
+    try:
+        entries = sorted(Path(folder).iterdir(), key=lambda item: natural_key(item.name))
+    except OSError:
+        return
+    for entry in entries:
+        try:
+            is_dir = entry.is_dir()
+        except OSError:
+            is_dir = False
+        if is_dir:
+            if recursive:
+                _walk_audio(entry, True, found, seen)
+            continue
+        try:
+            is_file = entry.is_file()
+        except OSError:
+            is_file = False
+        if is_file and looks_like_audio(entry):
+            found.append(entry)
+
+
+def scan_audio(folder, recursive=False):
+    """Return the audio files in a folder, sorted like a file manager."""
+    folder = Path(folder)
+    found = []
+    _walk_audio(folder, recursive, found, set())
+    if recursive:
+        return sorted(found, key=lambda item: natural_key(_relative_text(item, folder)))
+    return found
+
+
+def _relative_text(path, folder):
+    try:
+        return str(Path(path).relative_to(folder))
+    except (ValueError, OSError):
+        return Path(path).name
+
+
+def audio_filetypes():
+    """File dialog patterns covering every supported extension."""
+    def patterns(extensions):
+        return " ".join("*" + extension for extension in sorted(set(extensions)))
+
+    supported = [extension for extension in AUDIO_EXTENSIONS]
+    types = [("All supported audio", patterns(supported))]
+    for label, group in AUDIO_EXTENSION_GROUPS:
+        allowed = [extension for extension in group if extension in AUDIO_EXTENSIONS]
+        if allowed:
+            types.append((label, patterns(allowed)))
+    types.append(("All files", "*.*"))
+    return types
+
+
+def gui_settings_path():
+    """Per-user settings file; override with NEW_TXT_FROM_AUDIO_GUI_SETTINGS."""
+    override = os.environ.get("NEW_TXT_FROM_AUDIO_GUI_SETTINGS")
+    if override:
+        return Path(override).expanduser()
+    if sys.platform == "win32":
+        base = os.environ.get("APPDATA") or os.environ.get("LOCALAPPDATA")
+        if base:
+            return Path(base) / "new_txt_from_audio_GUI" / "settings.json"
+    elif sys.platform == "darwin":
+        return (Path.home() / "Library" / "Application Support"
+                / "new_txt_from_audio_GUI" / "settings.json")
+    base = os.environ.get("XDG_CONFIG_HOME")
+    if base:
+        return Path(base) / "new_txt_from_audio_GUI" / "settings.json"
+    return Path.home() / ".config" / "new_txt_from_audio_GUI" / "settings.json"
+
+
+DEFAULT_GUI_SETTINGS = {
+    "last_folder": "",
+    "lead_seconds": CTRL_CLICK_LEAD_SECONDS,
+    "follow": True,
+    "recursive": False,
+    "auto_align": False,
+}
+
+
+def load_gui_settings(path=None):
+    """Read the small settings file, ignoring anything malformed."""
+    settings = dict(DEFAULT_GUI_SETTINGS)
+    try:
+        data = json.loads(Path(path or gui_settings_path()).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return settings
+    if not isinstance(data, dict):
+        return settings
+    folder = data.get("last_folder")
+    if isinstance(folder, str) and folder:
+        settings["last_folder"] = folder
+    lead = data.get("lead_seconds")
+    if isinstance(lead, (int, float)) and not isinstance(lead, bool):
+        settings["lead_seconds"] = max(-2.0, min(2.0, float(lead)))
+    for key in ("follow", "recursive", "auto_align"):
+        if isinstance(data.get(key), bool):
+            settings[key] = data[key]
+    return settings
+
+
+def save_gui_settings(values, path=None):
+    """Best-effort settings write; a read-only profile must not break the GUI."""
+    target = Path(path or gui_settings_path())
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(
+            json.dumps(values, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        return True
+    except OSError:
+        return False
+
+
+def line_offsets(text):
+    """Character offset of the start of every line in ``text``."""
+    starts = [0]
+    position = text.find("\n")
+    while position != -1:
+        starts.append(position + 1)
+        position = text.find("\n", position + 1)
+    return starts
+
+
+def offset_from_index(index, starts):
+    """Convert a Tk ``line.column`` index to a character offset, or None.
+
+    Using the precomputed line starts keeps bulk operations (hundreds of
+    marks on a long transcript) linear instead of scanning the text once
+    per mark with Text.count.
+    """
+    try:
+        line, column = str(index).split(".")
+        line_number = int(line) - 1
+        if not 0 <= line_number < len(starts):
+            return None
+        return starts[line_number] + int(column)
+    except (ValueError, AttributeError):
+        return None
 
 
 WORD_RE = re.compile(r"\S+")
@@ -214,6 +457,37 @@ def trim_word_range(text, start, end):
     return start, end
 
 
+def word_weight(text, start, end):
+    """Characters in a word plus the pause its punctuation implies."""
+    weight = max(1.0, float(end - start))
+    if 0 < end <= len(text):
+        weight += PAUSE_WEIGHTS.get(text[end - 1], 0.0)
+    return weight
+
+
+def spread_word_marks(text, words, start_index, end_index, start_time, end_time):
+    """Times for words[start_index:end_index] inside a time window.
+
+    Words are placed at the midpoint of their weighted share, which keeps a
+    single word centred in its window instead of pinning it to the edge.
+    Returns (seconds, word index) pairs.
+    """
+    indexes = list(range(start_index, end_index))
+    if not indexes:
+        return []
+    weights = [word_weight(text, words[index][0], words[index][1])
+               for index in indexes]
+    total = sum(weights) or float(len(indexes))
+    span = max(0.0, float(end_time) - float(start_time))
+    marks = []
+    clock = 0.0
+    for index, weight in zip(indexes, weights):
+        center = clock + weight / 2.0
+        marks.append((float(start_time) + span * center / total, index))
+        clock += weight
+    return marks
+
+
 def estimate_marks(text, duration, lead=ESTIMATE_LEAD_SECONDS,
                    tail=ESTIMATE_TAIL_SECONDS):
     """Spread word marks over the duration, weighted by word length.
@@ -230,15 +504,142 @@ def estimate_marks(text, duration, lead=ESTIMATE_LEAD_SECONDS,
     if not words or duration <= 0:
         return []
 
-    usable = max(0.1, duration - lead - tail)
-    weights = [max(1, end - start) for start, end in words]
-    total = float(sum(weights))
+    end_time = max(float(lead), duration - tail)
+    pairs = spread_word_marks(text, words, 0, len(words), float(lead), end_time)
+    return [(round(max(0.0, time_value), 3), words[index][0])
+            for time_value, index in pairs]
+
+
+def estimate_marks_in_segments(text, segments, lead=0.0, tail=0.0):
+    """Spread word marks over detected speech runs instead of the whole file.
+
+    Every word keeps its weighted position in the text, mapped onto the
+    concatenated speech time, so long pauses are skipped rather than filled
+    with words. This is the automatic estimate used when FFmpeg can tell
+    speech from silence.
+    """
+    words = text_words(text)
+    cleaned = []
+    for pair in segments or ():
+        try:
+            start = max(0.0, float(pair[0]))
+            end = float(pair[1])
+        except (TypeError, ValueError, IndexError):
+            continue
+        if end > start:
+            cleaned.append((start, end))
+    if not words or not cleaned:
+        return []
+    cleaned.sort()
+
+    # Keep the first word a moment after speech starts and the last word a
+    # moment before it ends, when the run is long enough to give up the room.
+    first_start, first_end = cleaned[0]
+    if first_end - first_start > lead + 0.05:
+        cleaned[0] = (first_start + max(0.0, float(lead)), first_end)
+    last_start, last_end = cleaned[-1]
+    if last_end - last_start > tail + 0.05:
+        cleaned[-1] = (last_start, last_end - max(0.0, float(tail)))
+
+    lengths = [end - start for start, end in cleaned]
+    speech_total = float(sum(lengths)) or 1.0
+    weights = [word_weight(text, start, end) for start, end in words]
+    total = float(sum(weights)) or 1.0
+
     marks = []
-    clock = float(lead)
+    clock = 0.0
     for (start, _end), weight in zip(words, weights):
-        marks.append((round(clock, 3), start))
-        clock += usable * weight / total
+        center = clock + weight / 2.0
+        clock += weight
+        target = speech_total * min(1.0, center / total)
+        elapsed = 0.0
+        time_value = cleaned[-1][1]
+        for (segment_start, _segment_end), length in zip(cleaned, lengths):
+            if target <= elapsed + length:
+                time_value = segment_start + (target - elapsed)
+                break
+            elapsed += length
+        marks.append((round(max(0.0, time_value), 3), start))
     return marks
+
+
+def estimate_marks_from_anchors(text, duration, anchors,
+                                lead=ESTIMATE_LEAD_SECONDS,
+                                tail=ESTIMATE_TAIL_SECONDS):
+    """Fill every word, keeping the given marks as fixed anchors.
+
+    ``anchors`` is a list of (seconds, character offset) marks, usually the
+    words the user pinned with Ctrl+click. Words between two anchors are
+    spread by weight inside that time window; the head and tail of the text
+    use the same lead/tail as the plain estimate. The result covers every
+    word, so the karaoke highlight stays smooth with only a few anchors.
+    """
+    words = text_words(text)
+    try:
+        duration = float(duration or 0.0)
+    except (TypeError, ValueError):
+        duration = 0.0
+    if not words:
+        return []
+
+    word_starts = [start for start, _end in words]
+    pinned = {}
+    for time_value, offset in anchors or ():
+        try:
+            seconds = float(time_value)
+            offset = int(offset)
+        except (TypeError, ValueError):
+            continue
+        index = bisect.bisect_right(word_starts, offset) - 1
+        index = max(0, min(index, len(words) - 1))
+        seconds = max(0.0, seconds)
+        if duration > 0:
+            seconds = min(seconds, duration)
+        previous = pinned.get(index)
+        if previous is None or seconds > previous:
+            pinned[index] = seconds
+    if not pinned:
+        return estimate_marks(text, duration, lead, tail)
+
+    marks = []
+    ordered = sorted(pinned)
+    first_index = ordered[0]
+    first_time = pinned[first_index]
+    if first_index > 0:
+        start_time = min(max(0.0, float(lead)), max(0.0, first_time - 0.05))
+        marks.extend(spread_word_marks(text, words, 0, first_index,
+                                       start_time, first_time))
+    marks.append((first_time, first_index))
+
+    for position in range(1, len(ordered)):
+        left, right = ordered[position - 1], ordered[position]
+        left_time = pinned[left]
+        right_time = pinned[right]
+        if right - left > 1:
+            marks.extend(spread_word_marks(text, words, left + 1, right,
+                                           left_time, max(left_time, right_time)))
+        marks.append((right_time, right))
+
+    last_index = ordered[-1]
+    last_time = pinned[last_index]
+    if last_index < len(words) - 1:
+        if duration > 0:
+            end_time = max(last_time, duration - max(0.0, float(tail)))
+        else:
+            remaining = sum(word_weight(text, start, end)
+                            for start, end in words[last_index + 1:])
+            end_time = last_time + max(1.0, remaining * 0.35)
+        marks.extend(spread_word_marks(text, words, last_index + 1, len(words),
+                                       last_time, end_time))
+
+    marks.sort(key=lambda item: item[1])
+    result = []
+    clock = 0.0
+    for time_value, index in marks:
+        time_value = round(max(clock, max(0.0, time_value)), 3)
+        clock = time_value
+        result.append((time_value, words[index][0]))
+    return result
 
 
 def clean_word(value):
@@ -515,6 +916,114 @@ def detect_duration(path):
         except (TypeError, ValueError):
             continue
     return None
+
+
+SILENCE_START_RE = re.compile(r"silence_start:\s*(-?\d+(?:\.\d+)?)")
+SILENCE_END_RE = re.compile(r"silence_end:\s*(-?\d+(?:\.\d+)?)")
+
+
+def parse_silences(output):
+    """Return (start, end) silence spans from FFmpeg silencedetect output."""
+    spans = []
+    pending = None
+    for line in str(output).splitlines():
+        match = SILENCE_START_RE.search(line)
+        if match:
+            try:
+                pending = max(0.0, float(match.group(1)))
+            except ValueError:
+                pending = None
+            continue
+        match = SILENCE_END_RE.search(line)
+        if match:
+            try:
+                end = float(match.group(1))
+            except ValueError:
+                end = None
+            if pending is not None and end is not None and end > pending:
+                spans.append((pending, end))
+            pending = None
+    return spans
+
+
+def speech_segments_from_silences(silences, duration,
+                                  min_segment=SPEECH_MIN_SEGMENT_SECONDS,
+                                  merge_gap=SPEECH_MERGE_GAP_SECONDS):
+    """Complement of the silence spans inside [0, duration]."""
+    try:
+        duration = float(duration)
+    except (TypeError, ValueError):
+        return []
+    if duration <= 0:
+        return []
+    segments = []
+    cursor = 0.0
+    for start, end in sorted(silences or ()):
+        try:
+            start = max(0.0, min(float(start), duration))
+            end = max(0.0, min(float(end), duration))
+        except (TypeError, ValueError):
+            continue
+        if start - cursor > min_segment:
+            segments.append((cursor, start))
+        cursor = max(cursor, end)
+    if duration - cursor > min_segment:
+        segments.append((cursor, duration))
+
+    merged = []
+    for start, end in segments:
+        if merged and start - merged[-1][1] <= merge_gap:
+            merged[-1] = (merged[-1][0], end)
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def detect_speech_segments(path, duration=None, ffmpeg=None,
+                           noise_db=SPEECH_NOISE_DB,
+                           min_silence=SPEECH_MIN_SILENCE_SECONDS):
+    """Speech runs found with ``ffmpeg silencedetect``; [] when unavailable.
+
+    This only decodes audio (``-vn``) and writes no file, so it is cheap
+    compared with transcription and needs no model.
+    """
+    if not SPEECH_ALIGNMENT:
+        return []
+    if ffmpeg is None:
+        tool = find_program("ffmpeg")
+    else:
+        tool = ffmpeg
+    if not tool:
+        return []
+    if duration is None:
+        duration = detect_duration(path)
+    try:
+        duration = float(duration or 0.0)
+    except (TypeError, ValueError):
+        return []
+    if duration <= 0:
+        return []
+
+    command = [
+        tool, "-nostdin", "-hide_banner", "-i", str(path), "-vn",
+        "-af", f"silencedetect=noise={noise_db}dB:d={min_silence}",
+        "-f", "null", "-",
+    ]
+    try:
+        result = subprocess.run(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+            errors="replace",
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if result.returncode:
+        return []
+    return speech_segments_from_silences(parse_silences(result.stderr), duration)
 
 
 class NullEngine:
@@ -996,6 +1505,7 @@ class AudioTextGUI:
         self._marks_sorted = []
         self._mark_times = []
         self._last_active_mark = None
+        self._highlight_stale = True
         self._loading_text = False
 
         self.transcriber_script = TRANSCRIBER_SCRIPT
@@ -1013,6 +1523,10 @@ class AudioTextGUI:
         self._poll_id = None
         self._closing = False
 
+        self.settings = load_gui_settings()
+        self.lead_seconds = float(self.settings["lead_seconds"])
+        self._estimating = False
+
         engine, self.engine_notes = create_audio_engine()
         self.player = AudioPlayer(engine)
 
@@ -1025,8 +1539,14 @@ class AudioTextGUI:
                 self.log(note)
             self.log("No audio backend found - editing and sync still work.")
 
-        if start_folder:
-            self.open_folder(start_folder)
+        start = Path(start_folder).expanduser() if start_folder else None
+        if start is None or not start.is_dir():
+            remembered = self.settings.get("last_folder") or ""
+            candidate = Path(remembered).expanduser() if remembered else None
+            if candidate is not None and candidate.is_dir():
+                start = candidate
+        if start is not None:
+            self.open_folder(start)
         else:
             self.open_folder(APP_DIR, quiet=True)
 
@@ -1102,6 +1622,10 @@ class AudioTextGUI:
             folder_row, text="Open folder...", command=self.choose_folder
         ).pack(side=tk.LEFT)
 
+        ttk.Button(
+            folder_row, text="Open file...", command=self.choose_audio_file
+        ).pack(side=tk.LEFT, padx=(6, 0))
+
         self.folder_label = ttk.Label(
             folder_row, text="No folder", foreground=COLOR_MUTED
         )
@@ -1115,6 +1639,14 @@ class AudioTextGUI:
         )
         self.file_count_label.pack(side=tk.RIGHT)
 
+        self.recursive_var = tk.BooleanVar(
+            master=self.root, value=bool(self.settings.get("recursive"))
+        )
+        ttk.Checkbutton(
+            list_head, text="Subfolders", variable=self.recursive_var,
+            command=self.on_recursive_toggle,
+        ).pack(side=tk.LEFT, padx=(12, 0))
+
         self.filter_var = tk.StringVar(master=self.root)
         filter_entry = ttk.Entry(parent, textvariable=self.filter_var)
         filter_entry.pack(fill=tk.X, pady=(0, 6))
@@ -1125,15 +1657,17 @@ class AudioTextGUI:
 
         self.tree = ttk.Treeview(
             tree_frame,
-            columns=("txt", "size"),
+            columns=("txt", "sync", "size"),
             show="tree headings",
             selectmode="browse",
         )
         self.tree.heading("#0", text="Audio file")
         self.tree.heading("txt", text="txt")
+        self.tree.heading("sync", text="sync")
         self.tree.heading("size", text="Size")
         self.tree.column("#0", width=180, stretch=True)
         self.tree.column("txt", width=32, anchor=tk.CENTER, stretch=False)
+        self.tree.column("sync", width=40, anchor=tk.CENTER, stretch=False)
         self.tree.column("size", width=64, anchor=tk.E, stretch=False)
         self.tree.tag_configure("has_text", foreground=COLOR_OK)
         self.tree_paths = {}
@@ -1252,6 +1786,8 @@ class AudioTextGUI:
         self.editor.bind(
             "<Control-space>", lambda event: (self.toggle_play(), "break")[1]
         )
+        # Double-click a pinned word to jump the audio to its mark.
+        self.editor.bind("<Double-Button-1>", self.on_editor_double_click, add="+")
 
         sync_bar = ttk.Frame(parent)
         sync_bar.pack(fill=tk.X)
@@ -1260,18 +1796,27 @@ class AudioTextGUI:
         self.sync_hint = ttk.Label(
             sync_bar,
             text=(f"Playing? {add_key}+click a word to pin it to the current "
-                  f"time. {add_key}+right-click removes a mark."),
-            foreground=COLOR_MUTED, wraplength=640,
+                  f"time. {add_key}+right-click removes a mark. "
+                  f"{add_key}+Shift+click also fills the words around it."),
+            foreground=COLOR_MUTED, wraplength=660,
         )
         self.sync_hint.pack(anchor="w")
 
         sync_buttons = ttk.Frame(parent)
         sync_buttons.pack(fill=tk.X, pady=(6, 0))
 
-        self.follow_var = tk.BooleanVar(master=self.root, value=True)
+        self.follow_var = tk.BooleanVar(
+            master=self.root, value=bool(self.settings.get("follow", True))
+        )
         ttk.Checkbutton(
-            sync_buttons, text="Follow playback", variable=self.follow_var
+            sync_buttons, text="Follow playback", variable=self.follow_var,
+            command=self._save_settings,
         ).pack(side=tk.LEFT)
+
+        self.sync_status = ttk.Label(
+            sync_buttons, text="0 sync marks", foreground=COLOR_MUTED
+        )
+        self.sync_status.pack(side=tk.LEFT, padx=(12, 0))
 
         ttk.Button(
             sync_buttons, text="Clear marks", command=self.clear_sync_marks
@@ -1281,14 +1826,46 @@ class AudioTextGUI:
             sync_buttons, text="Import timings...", command=self.import_timings_dialog
         ).pack(side=tk.RIGHT, padx=(0, 6))
 
-        ttk.Button(
-            sync_buttons, text="Auto-estimate", command=self.estimate_sync
-        ).pack(side=tk.RIGHT, padx=(0, 6))
-
-        self.sync_status = ttk.Label(
-            sync_buttons, text="0 sync marks", foreground=COLOR_MUTED
+        self.refine_button = ttk.Button(
+            sync_buttons, text="Fill from marks", command=self.refine_from_marks
         )
-        self.sync_status.pack(side=tk.LEFT, padx=(12, 0))
+        self.refine_button.pack(side=tk.RIGHT, padx=(0, 6))
+        self.refine_button.state(["disabled"])
+
+        self.estimate_button = ttk.Button(
+            sync_buttons, text="Auto-estimate", command=self.estimate_sync
+        )
+        self.estimate_button.pack(side=tk.RIGHT, padx=(0, 6))
+
+        lead_row = ttk.Frame(parent)
+        lead_row.pack(fill=tk.X, pady=(6, 0))
+
+        ttk.Label(lead_row, text=f"{add_key}+click reaction:").pack(side=tk.LEFT)
+        self.lead_var = tk.DoubleVar(master=self.root, value=self.lead_seconds)
+        if hasattr(ttk, "Spinbox"):
+            self.lead_entry = ttk.Spinbox(
+                lead_row, from_=-2.0, to=2.0, increment=0.05, width=6,
+                textvariable=self.lead_var, command=self._on_lead_changed,
+            )
+        else:  # very old Tk: plain entry still works
+            self.lead_entry = ttk.Entry(
+                lead_row, width=6, textvariable=self.lead_var
+            )
+        self.lead_entry.pack(side=tk.LEFT, padx=(6, 0))
+        self.lead_entry.bind("<Return>", lambda _event: self._on_lead_changed())
+        self.lead_entry.bind("<FocusOut>", lambda _event: self._on_lead_changed())
+        ttk.Label(
+            lead_row, text="s subtracted from a live mark; 0 = raw time",
+            foreground=COLOR_MUTED,
+        ).pack(side=tk.LEFT, padx=(8, 0))
+
+        self.auto_align_var = tk.BooleanVar(
+            master=self.root, value=bool(self.settings.get("auto_align"))
+        )
+        ttk.Checkbutton(
+            lead_row, text="Auto-align on load", variable=self.auto_align_var,
+            command=self._save_settings,
+        ).pack(side=tk.RIGHT)
 
     def build_menu(self):
         menubar = tk.Menu(self.root)
@@ -1296,6 +1873,10 @@ class AudioTextGUI:
         file_menu = tk.Menu(menubar, tearoff=False)
         file_menu.add_command(
             label="Open folder...", accelerator="Ctrl+O", command=self.choose_folder
+        )
+        file_menu.add_command(
+            label="Open audio file...", accelerator="Ctrl+Shift+O",
+            command=self.choose_audio_file,
         )
         file_menu.add_command(
             label="Save text", accelerator="Ctrl+S", command=self.save_text
@@ -1314,6 +1895,12 @@ class AudioTextGUI:
             label="Open audio folder in file manager",
             command=self.open_folder_in_file_manager,
         )
+        tools_menu.add_separator()
+        tools_menu.add_checkbutton(
+            label="Auto-align texts on load",
+            variable=self.auto_align_var,
+            command=self._save_settings,
+        )
         menubar.add_cascade(label="Tools", menu=tools_menu)
 
         help_menu = tk.Menu(menubar, tearoff=False)
@@ -1324,8 +1911,15 @@ class AudioTextGUI:
         self.root.bind("<Control-s>", lambda event: (self.save_text(), "break")[1])
         self.root.bind("<Control-o>", lambda event: (self.choose_folder(), "break")[1])
         self.root.bind(
+            "<Control-Shift-O>",
+            lambda event: (self.choose_audio_file(), "break")[1],
+        )
+        self.root.bind(
             "<Control-space>",
             lambda event: (self.toggle_play(), "break")[1],
+        )
+        self.root.bind(
+            "<Control-r>", lambda event: (self.refine_from_marks(), "break")[1]
         )
 
     # --------------------------------------------------------
@@ -1340,27 +1934,73 @@ class AudioTextGUI:
         if folder:
             self.open_folder(folder)
 
-    def open_folder(self, folder, quiet=False):
+    def choose_audio_file(self):
+        """Open a single audio file, using the same types as the CLI."""
+        initial = str(self.folder) if self.folder else str(APP_DIR)
+        path = filedialog.askopenfilename(
+            title="Open an audio file",
+            initialdir=initial,
+            filetypes=audio_filetypes(),
+        )
+        if path:
+            self.open_audio_file(Path(path))
+
+    def open_audio_file(self, path):
+        """Show one file in the list and load it, whatever its extension."""
+        path = Path(path).expanduser()
+        try:
+            path = path.resolve()
+        except OSError:
+            pass
+        if not path.is_file():
+            messagebox.showerror("File not found", f"{path}\nis not a file.")
+            return False
+        if not looks_like_audio(path) and not messagebox.askyesno(
+            "Unrecognised file",
+            f"{path.name} does not look like an audio file.\n\n"
+            "Open it anyway? Editing the text still works; playback may fail.",
+        ):
+            return False
+        if self.folder is None or path.parent != self.folder:
+            if not self.open_folder(path.parent, quiet=True, select_first=False):
+                return False
+        elif self._iid_for(path) is None:
+            self.refresh_audio_list()
+        if self._iid_for(path) is None:
+            # Filtered out or skipped by the folder scan: add it explicitly.
+            self._insert_audio_row(path)
+        self.select_audio(path)
+        iid = self._iid_for(path)
+        if iid is not None:
+            self.tree.selection_set(iid)
+            self.tree.see(iid)
+        return True
+
+    def on_recursive_toggle(self):
+        self._save_settings()
+        self.refresh_audio_list()
+
+    def open_folder(self, folder, quiet=False, select_first=True):
         folder = Path(folder).expanduser()
         if not folder.is_dir():
             if not quiet:
                 messagebox.showerror(
                     "Folder not found", f"{folder}\nis not a folder."
                 )
-            return
+            return False
         if not self.confirm_discard():
-            return
+            return False
         self.folder = folder.resolve()
         self.folder_label.config(text=str(self.folder))
         if self.filter_var.get():
             self.filter_var.set("")   # trace refreshes the list
         self.refresh_audio_list()
-        if self.audio_files:
+        if self.audio_files and select_first:
             first = self.audio_files[0]
             self.select_audio(first)
             if not quiet:
                 self.set_status(f"{len(self.audio_files)} audio file(s) in {self.folder.name}")
-        else:
+        elif not self.audio_files:
             self.player.stop()
             self.current_audio = None
             self.text_path = None
@@ -1369,12 +2009,45 @@ class AudioTextGUI:
             self._set_editor_text("")
             self._update_text_header()
             self._update_playback_widgets()
-            self.set_status("No audio files in this folder - use Open folder...")
+            self.set_status(
+                "No audio files in this folder - use Open folder... or Open file..."
+            )
+        elif not quiet:
+            self.set_status(f"{len(self.audio_files)} audio file(s) in {self.folder.name}")
+        self._save_settings()
+        return True
+
+    def _recursive_enabled(self):
+        variable = getattr(self, "recursive_var", None)
+        return bool(variable.get()) if variable is not None else False
+
+    def _display_name(self, path):
+        if self.folder is not None and self._recursive_enabled():
+            return _relative_text(path, self.folder)
+        return Path(path).name
+
+    def _insert_audio_row(self, path, label=None, iid=None):
+        path = Path(path)
+        has_text = companion_path(path, TEXT_SUFFIX).exists()
+        has_sync = companion_path(path, SYNC_SUFFIX).exists()
+        values = (
+            "\u2713" if has_text else "",
+            "\u25cf" if has_sync else "",
+            file_size_text(path),
+        )
+        if iid is None:
+            iid = f"extra{len(self.tree_paths)}"
+        self.tree_paths[iid] = path
+        self.tree.insert(
+            "", "end", iid=iid, text=label or Path(path).name, values=values,
+            tags=("has_text",) if has_text else (),
+        )
+        return iid
 
     def refresh_audio_list(self):
         if self.folder is None:
             return
-        files = scan_audio(self.folder)
+        files = scan_audio(self.folder, recursive=self._recursive_enabled())
         self.audio_files = files
 
         needle = ""
@@ -1386,16 +2059,10 @@ class AudioTextGUI:
         self.tree.delete(*self.tree.get_children())
         shown = 0
         for path in files:
-            if needle and needle not in path.name.lower():
+            label = self._display_name(path)
+            if needle and needle not in label.lower():
                 continue
-            has_text = companion_path(path, TEXT_SUFFIX).exists()
-            values = ("\u2713" if has_text else "", file_size_text(path))
-            iid = f"audio{shown}"
-            self.tree_paths[iid] = path
-            self.tree.insert(
-                "", "end", iid=iid, text=path.name, values=values,
-                tags=("has_text",) if has_text else (),
-            )
+            self._insert_audio_row(path, label=label, iid=f"audio{shown}")
             shown += 1
 
         self.file_count_label.config(text=f"{shown}/{len(files)}")
@@ -1416,14 +2083,15 @@ class AudioTextGUI:
     def select_audio(self, path):
         path = Path(path)
         if self.current_audio is not None and path == self.current_audio:
-            return
+            return True
         if not self.confirm_discard():
-            return
+            return False
         self.load_audio(path)
         iid = self._iid_for(path)
         if iid is not None:
             self.tree.selection_set(iid)   # on_tree_select is a no-op now
             self.tree.see(iid)
+        return True
 
     def on_tree_select(self, _event=None):
         selection = self.tree.selection()
@@ -1461,6 +2129,7 @@ class AudioTextGUI:
             loaded = self._load_sync_file()
             if not loaded:
                 self._auto_import_timings()
+            self._auto_align(path)
         else:
             self._set_dirty(False)
 
@@ -1518,6 +2187,7 @@ class AudioTextGUI:
         if self.marks:
             # Keep the little anchor highlights attached to their words.
             self._refresh_anchor_tags()
+            self._highlight_stale = True
 
     def confirm_discard(self):
         if not self.dirty:
@@ -1532,6 +2202,7 @@ class AudioTextGUI:
             return False
         if answer:
             return self.save_text()
+        self._set_dirty(False)   # discard once, do not ask again for this file
         return True
 
     def reload_text(self):
@@ -1615,6 +2286,7 @@ class AudioTextGUI:
         self._set_scale_position(0.0)
         self.editor.tag_remove("karaoke", "1.0", "end")
         self._last_active_mark = None
+        self._highlight_stale = True
 
     def skip(self, delta):
         if not self.player.available:
@@ -1757,13 +2429,16 @@ class AudioTextGUI:
             end += 1
         return start, end
 
-    def _mark_in_span(self, start, end):
+    def _mark_in_span(self, start, end, text=None):
+        if text is None:
+            text = self.editor_text()
+        starts = line_offsets(text)
         for name in list(self.marks):
             try:
-                offset = self._offset_of_index(self.editor.index(name))
+                offset = offset_from_index(self.editor.index(name), starts)
             except tk.TclError:
                 continue
-            if start <= offset < end:
+            if offset is not None and start <= offset < end:
                 return name
         return None
 
@@ -1771,6 +2446,7 @@ class AudioTextGUI:
         self._rebuild_mark_order()
         self._refresh_anchor_tags()
         self._update_sync_status()
+        self._highlight_stale = True
         if save:
             self._save_sync_file()
 
@@ -1780,6 +2456,8 @@ class AudioTextGUI:
 
     def _refresh_anchor_tags(self):
         self.editor.tag_remove("anchor", "1.0", "end")
+        if len(self.marks) > ANCHOR_TAG_LIMIT:
+            return
         for name in self.marks:
             try:
                 index = self.editor.index(name)
@@ -1792,6 +2470,34 @@ class AudioTextGUI:
         count = len(self.marks)
         text = "1 sync mark" if count == 1 else f"{count} sync marks"
         self.sync_status.config(text=text)
+        button = getattr(self, "refine_button", None)
+        if button is not None:
+            button.state(["!disabled"] if count else ["disabled"])
+
+    def _on_lead_changed(self, _event=None):
+        try:
+            value = float(self.lead_var.get())
+        except (tk.TclError, TypeError, ValueError):
+            self.lead_var.set(self.lead_seconds)
+            return
+        value = max(-2.0, min(2.0, value))
+        self.lead_var.set(value)
+        if abs(value - self.lead_seconds) < 1e-9:
+            return
+        self.lead_seconds = value
+        self.set_status(f"Ctrl+click reaction compensation: {value:+.2f} s")
+        self._save_settings()
+
+    def _save_settings(self):
+        self.settings["last_folder"] = str(self.folder) if self.folder else ""
+        self.settings["lead_seconds"] = round(float(self.lead_seconds), 3)
+        for attribute, version in (("follow_var", "follow"),
+                                   ("recursive_var", "recursive"),
+                                   ("auto_align_var", "auto_align")):
+            variable = getattr(self, attribute, None)
+            if variable is not None:
+                self.settings[version] = bool(variable.get())
+        save_gui_settings(self.settings)
 
     def _active_marks(self, position):
         if not self._marks_sorted:
@@ -1809,11 +2515,16 @@ class AudioTextGUI:
     def _update_highlight(self, position):
         if not self.follow_var.get() or not self.marks:
             self.editor.tag_remove("karaoke", "1.0", "end")
+            self._highlight_stale = True
             return
         active, following = self._active_marks(position)
         if active is None:
             self.editor.tag_remove("karaoke", "1.0", "end")
             self._last_active_mark = None
+            return
+        # Re-tagging the same word on every poll is wasted work for long
+        # texts; text edits and mark changes set the stale flag again.
+        if active == self._last_active_mark and not self._highlight_stale:
             return
 
         try:
@@ -1845,6 +2556,7 @@ class AudioTextGUI:
         self.editor.tag_remove("karaoke", "1.0", "end")
         self.editor.tag_add("karaoke", start_index, end_index)
 
+        self._highlight_stale = False
         if active != self._last_active_mark:
             self._last_active_mark = active
             self.editor.see(start_index)
@@ -1860,16 +2572,19 @@ class AudioTextGUI:
             offset = self._offset_of_index(index)
         except tk.TclError:
             return "break"
-        start, end = self._word_bounds(offset)
+        text = self.editor_text()
+        start, end = self._word_bounds(offset, text)
         if start == end:
             return "break"
 
         position = self.player.position
         if self.player.is_playing:
-            position = max(0.0, position - CTRL_CLICK_LEAD_SECONDS)
-        position = round(position, 3)
+            position = max(0.0, position - self.lead_seconds)
+        if self.player.duration:
+            position = min(position, self.player.duration)
+        position = round(max(0.0, position), 3)
 
-        existing = self._mark_in_span(start, end)
+        existing = self._mark_in_span(start, end, text)
         if existing:
             self.marks[existing] = position
             message = "Updated"
@@ -1880,7 +2595,7 @@ class AudioTextGUI:
             message = "Pinned"
         self._marks_changed(save=True)
         self._update_highlight(self.player.position)
-        trimmed = trim_word_range(self.editor_text(), start, end)
+        trimmed = trim_word_range(text, start, end)
         if trimmed[0] < trimmed[1]:
             start, end = trimmed
         word = self.editor.get(
@@ -1893,7 +2608,55 @@ class AudioTextGUI:
                 f"{message} '{word}' at {format_offset(position)} - "
                 "play or seek first to pin a real position"
             )
+
+        # Shift turns the click into an anchor: the words before and after
+        # it are re-spread between the existing marks.
+        if event.state & 0x0001:
+            filled = self._refine_silent()
+            if filled:
+                self.set_status(
+                    f"{message} '{word}' at {format_offset(position)} - "
+                    f"filled {filled} marks around it"
+                )
         return "break"
+
+    def on_editor_double_click(self, event):
+        """Double-click a pinned word to jump the audio to its mark."""
+        if self.current_audio is None or not self.marks:
+            return
+        try:
+            offset = self._offset_of_index(
+                self.editor.index(f"@{event.x},{event.y}")
+            )
+        except tk.TclError:
+            return
+        text = self.editor_text()
+        start, end = self._word_bounds(offset, text)
+        name = self._mark_in_span(start, end, text)
+        if name is None:
+            return
+        self.jump_to_mark(name)   # no "break": Tk still selects the word
+
+    def jump_to_mark(self, name):
+        time_value = self.marks.get(name)
+        if time_value is None:
+            return
+        if not self.player.available:
+            self.set_status("No audio backend; the mark time is " + format_offset(time_value))
+            return
+        if not self.player.can_seek:
+            self.set_status(
+                "This backend cannot seek; the mark is at " + format_offset(time_value)
+            )
+            return
+        try:
+            self.player.seek(time_value)
+        except PlaybackError as error:
+            messagebox.showerror("Playback error", str(error))
+            return
+        self._set_scale_position(self.player.position)
+        self._update_highlight(self.player.position)
+        self.set_status(f"Jumped to {format_offset(time_value)}")
 
     def on_remove_mark_click(self, event):
         try:
@@ -1901,8 +2664,9 @@ class AudioTextGUI:
             offset = self._offset_of_index(index)
         except tk.TclError:
             return "break"
-        start, end = self._word_bounds(offset)
-        name = self._mark_in_span(start, end)
+        text = self.editor_text()
+        start, end = self._word_bounds(offset, text)
+        name = self._mark_in_span(start, end, text)
         if name is None:
             self.set_status("No sync mark on that word.")
             return "break"
@@ -1960,6 +2724,60 @@ class AudioTextGUI:
         self._marks_changed(save=save)
         return len(pairs)
 
+    def _current_anchors(self):
+        anchors = []
+        for name, time_value in self.marks.items():
+            try:
+                offset = self._offset_of_index(self.editor.index(name))
+            except tk.TclError:
+                continue
+            anchors.append((float(time_value), offset))
+        return anchors
+
+    def _refine(self, announce=False):
+        """Spread every word between the existing marks (anchors)."""
+        text = self.editor_text()
+        anchors = self._current_anchors()
+        pairs = estimate_marks_from_anchors(text, self.player.duration, anchors)
+        if not pairs:
+            if announce:
+                messagebox.showinfo("Nothing to fill", "There are no words to align.")
+            return 0
+        count = self._apply_offsets(pairs, save=True)
+        self._update_highlight(self.player.position)
+        message = (f"Filled {count} marks from {len(anchors)} anchor"
+                   + ("" if len(anchors) == 1 else "s"))
+        self.log(message + ".")
+        if announce:
+            self.set_status(message + " - play and correct any word that drifts.")
+        return count
+
+    def _refine_silent(self):
+        return self._refine(announce=False)
+
+    def refine_from_marks(self):
+        if self.current_audio is None:
+            messagebox.showinfo("No audio selected", "Select an audio file first.")
+            return
+        if not self.editor_text().strip():
+            messagebox.showinfo("No text", "There is no text to align yet.")
+            return
+        if not self.marks:
+            messagebox.showinfo(
+                "No marks yet",
+                "Ctrl+click a few words while the audio plays (a word near the "
+                "start, one in the middle, one near the end), then use this "
+                "button to fill the rest of the text from those anchors.",
+            )
+            return
+        if not messagebox.askyesno(
+            "Fill from marks",
+            f"Keep the {len(self.marks)} existing marks as anchors and spread "
+            "the remaining words between them?\n\nNo existing mark is moved.",
+        ):
+            return
+        self._refine(announce=True)
+
     def estimate_sync(self):
         if self.current_audio is None:
             messagebox.showinfo("No audio selected", "Select an audio file first.")
@@ -1977,28 +2795,113 @@ class AudioTextGUI:
                 "Import timings from a transcript JSON/SRT file.",
             )
             return
+        if self._estimating:
+            return
         if self.marks and not messagebox.askyesno(
             "Replace marks?",
-            f"This replaces the {len(self.marks)} existing sync marks with a "
-            "rough estimate. Continue?",
+            f"This replaces the {len(self.marks)} existing sync marks with an "
+            "automatic estimate.\n\nTip: 'Fill from marks' keeps your marks as "
+            "anchors instead. Continue?",
         ):
             return
-        pairs = estimate_marks(text, duration)
-        self._apply_offsets(pairs, save=True)
-        self.log(f"Estimated {len(pairs)} sync points over {format_clock(duration)}.")
+
+        self._estimating = True
+        self.estimate_button.state(["disabled"])
+        tool = find_program("ffmpeg") if SPEECH_ALIGNMENT else None
+        if tool:
+            self.log("Auto-estimate: looking for speech and pauses with FFmpeg...")
+            self.set_status("Auto-estimate: analysing speech pauses...")
+        else:
+            self.log("Auto-estimate: FFmpeg not found, spreading words by length.")
+            self.set_status("Auto-estimate: spreading words by length...")
+        threading.Thread(
+            target=self._estimate_worker,
+            args=(self.current_audio, text, duration, tool),
+            daemon=True,
+        ).start()
+
+    def _auto_align(self, audio):
+        """Run the automatic estimate on load when the user enabled it."""
+        variable = getattr(self, "auto_align_var", None)
+        if variable is None or not variable.get():
+            return
+        if self.marks or self._estimating:
+            return
+        text = self.editor_text()
+        duration = self.player.duration
+        if not text.strip() or not duration:
+            return
+        tool = find_program("ffmpeg") if SPEECH_ALIGNMENT else None
+        self.log(
+            f"Auto-align: estimating sync points for {Path(audio).name} "
+            f"({'speech pauses' if tool else 'word length'})..."
+        )
+        self._estimating = True
+        self.estimate_button.state(["disabled"])
+        threading.Thread(
+            target=self._estimate_worker,
+            args=(Path(audio), text, duration, tool),
+            daemon=True,
+        ).start()
+
+    def _estimate_worker(self, audio, text, duration, ffmpeg):
+        """Runs off the UI thread; the result returns through worker_queue."""
+        pairs = []
+        method = "word length"
+        error = None
+        try:
+            segments = []
+            if ffmpeg:
+                segments = detect_speech_segments(
+                    audio, duration=duration, ffmpeg=ffmpeg
+                )
+            if len(segments) > 1:
+                pairs = estimate_marks_in_segments(text, segments)
+                if pairs:
+                    method = f"{len(segments)} speech segments"
+            if not pairs:
+                pairs = estimate_marks(text, duration)
+        except Exception as exc:   # keep the poll loop alive whatever happens
+            error = str(exc)
+        self.worker_queue.put(("align_done", (audio, text, pairs, method, error)))
+
+    def _on_align_done(self, audio, text, pairs, method, error):
+        self._estimating = False
+        self.estimate_button.state(["!disabled"])
+        if error:
+            self.log(f"Auto-estimate failed: {error}")
+            self.set_status("Auto-estimate failed; see the log.")
+            return
+        if audio != self.current_audio:
+            self.log("Auto-estimate finished for another file; result discarded.")
+            return
+        if text != self.editor_text():
+            self.log("Text changed during auto-estimate; result discarded.")
+            self.set_status("Text changed; run Auto-estimate again.")
+            return
+        if not pairs:
+            self.set_status("Auto-estimate found no words to mark.")
+            return
+        count = self._apply_offsets(pairs, save=True)
+        self._update_highlight(self.player.position)
+        self.log(f"Estimated {count} sync points using {method}.")
         self.set_status(
-            f"Estimated {len(pairs)} marks - play and Ctrl+click words to correct them."
+            f"Estimated {count} marks ({method}) - play and Ctrl+click words "
+            "to correct them."
         )
 
     def _save_sync_file(self):
         if self.current_audio is None or self.sync_path is None:
             return
         text = self.editor_text()
+        starts = line_offsets(text)
         marks = []
         for name, time_value in self.marks.items():
             try:
-                offset = self._offset_of_index(self.editor.index(name))
+                offset = offset_from_index(self.editor.index(name), starts)
             except tk.TclError:
+                continue
+            if offset is None:
                 continue
             start, end = self._word_bounds(offset, text)
             trimmed = trim_word_range(text, start, end)
@@ -2200,7 +3103,9 @@ class AudioTextGUI:
                 messagebox.showinfo("No folder", "Open an audio folder first.")
                 return
             targets = [
-                path for path in scan_audio(self.folder)
+                path for path in scan_audio(
+                    self.folder, recursive=self._recursive_enabled()
+                )
                 if not companion_path(path, TEXT_SUFFIX).exists()
             ]
             if not targets:
@@ -2313,6 +3218,8 @@ class AudioTextGUI:
                 self._on_transcriber_done(*payload)
             elif kind == "install_done":
                 self._on_install_done(*payload)
+            elif kind == "align_done":
+                self._on_align_done(*payload)
 
     def _on_transcriber_done(self, process, audio, code):
         if process is not self.transcriber_proc:
@@ -2344,6 +3251,7 @@ class AudioTextGUI:
             loaded = self._load_sync_file()
             if not loaded:
                 self._auto_import_timings()
+            self._auto_align(audio)
             self.set_status(f"Loaded {text_file.name}")
         else:
             self.log(
@@ -2478,18 +3386,33 @@ class AudioTextGUI:
             messagebox.showerror("Could not open folder", str(error))
 
     def show_help(self):
+        add_key = "Command" if sys.platform == "darwin" else "Ctrl"
         messagebox.showinfo(
             "How sync works",
-            "Ctrl+click a word while the audio plays to pin that word to the "
-            "current position. Pinned words get a light blue underline.\n\n"
+            f"{add_key}+click a word while the audio plays to pin that word "
+            "to the current position. Pinned words get a light blue "
+            "underline.\n\n"
+            f"{add_key}+right-click removes a mark from a word. "
+            f"{add_key}+Shift+click pins a word and immediately fills the "
+            "rest of the text from all marks ('Fill from marks'). "
+            "Double-click a pinned word to jump the audio to it.\n\n"
             "During playback the highlighted word follows the timestamps. "
-            "Ctrl+right-click removes a mark from a word. 'Auto-estimate' "
-            "spreads marks over the file by word length; 'Import timings...' "
-            "reads whisper-style JSON or SRT/VTT files.\n\n"
+            "'Auto-estimate' spreads marks over the file: with FFmpeg it "
+            "first finds the speech runs with silencedetect, so pauses do "
+            "not swallow words; without FFmpeg it uses word length only. "
+            "'Fill from marks' keeps the marks you pinned as anchors and "
+            "fits every other word between them. 'Import timings...' reads "
+            "whisper-style JSON or SRT/VTT files.\n\n"
+            "The spinbox under the buttons sets how much reaction time is "
+            "subtracted from a mark clicked during playback.\n\n"
+            "'Auto-align on load' (off by default) runs the automatic "
+            "estimate whenever a text is opened without marks, so a fresh "
+            "transcript already follows the audio.\n\n"
             "Marks are stored in <audio name>.sync.json next to the audio, "
             "so they survive restarts and text edits.\n\n"
-            "Shortcuts: Ctrl+O open folder, Ctrl+S save text, "
-            "Ctrl+Space play/pause.",
+            f"Shortcuts: {add_key}+O open folder, {add_key}+Shift+O open an "
+            f"audio file, {add_key}+S save text, {add_key}+R fill from "
+            f"marks, {add_key}+Space play/pause.",
         )
 
     # --------------------------------------------------------
@@ -2510,6 +3433,7 @@ class AudioTextGUI:
     def on_close(self):
         if not self.confirm_discard():
             return
+        self._save_settings()
         self._closing = True
         if self._poll_id is not None:
             try:
@@ -2541,10 +3465,22 @@ def main(argv=None):
 
     install_audio = "--install-audio" in arguments
     arguments = [item for item in arguments if not item.startswith("-")]
-    start_folder = Path(arguments[0]).expanduser() if arguments else None
+    start = Path(arguments[0]).expanduser() if arguments else None
+
+    # Like the console script, accept either a folder or a single audio file.
+    start_folder = None
+    start_file = None
+    if start is not None:
+        if start.is_file():
+            start_folder = start.parent
+            start_file = start
+        else:
+            start_folder = start
 
     root = tk.Tk()
     app = AudioTextGUI(root, start_folder=start_folder)
+    if start_file is not None:
+        root.after(0, lambda: app.open_audio_file(start_file))
     if install_audio:
         root.after(300, app.install_audio_support)
     root.mainloop()

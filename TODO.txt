@@ -8,6 +8,17 @@ update after files created to show companion text file in right side (text edito
 
 then investigate possibility to highlight current word to sync audio and text (karaoke-like). automatic or something like ctrl-click to add sync position to current played
 
+## DONE: GUI file-type parity + automatic sync helpers (new_txt_from_audio_GUI.py)
+file list and Open file... dialog now use the console extension set (+ signature
+sniffing), so nothing the console transcriber accepts is hidden; single files and
+subfolders can be opened. Auto-estimate asks ffmpeg silencedetect where the speech
+runs are and spreads words over those runs only; Fill from marks interpolates all
+words between Ctrl+click anchors (Ctrl+Shift+click pins and fills at once);
+double-click a pinned word to seek; reaction lead is a persisted spinbox;
+optional auto-align on load; per-user settings file. Dense marks now use one
+linear index<->offset pass instead of a Text.count per mark.
+Tests: test_prompt/test_new_txt_from_audio_gui.py
+
 
 ## DONE: implement new script
 open_file_via_http.py  (dev_helper/view/open_file_via_http.py)
