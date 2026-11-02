@@ -101,8 +101,9 @@ def has_audio_signature(path):
         return False
     if len(head) < 4:
         return False
-    # WAVE container: RIFF/RIFX/rf64 + "WAVE". Inner codec may be PCM, MPEG, ...
-    if head[8:12] == b"WAVE" and head[:4] in (b"RIFF", b"RIFX", b"rf64"):
+    # WAVE container: RIFF/RIFX/RF64/BW64 + "WAVE". Inner codec may be PCM, MPEG, ...
+    # ("rf64" is kept for files written by tools that got the case wrong.)
+    if head[8:12] == b"WAVE" and head[:4] in (b"RIFF", b"RIFX", b"RF64", b"rf64", b"BW64"):
         return True
     if head[:4] in (b"fLaC", b"OggS", b".snd", b"MAC ", b"wvpk", b"TTA1"):
         return True
