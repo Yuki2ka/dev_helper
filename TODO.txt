@@ -1,3 +1,35 @@
+## dev_helper/new_file/new_txt_from_audio_GUI.py
+
+open folder
+show sound files in left side (explorer). buttons: play/pause -10s
+button to run
+dev_helper/new_file/new_txt_from_audio.py
+update after files created to show companion text file in right side (text editor). save text button.
+
+then investigate possibility to highlight current word to sync audio and text (karaoke-like). automatic or something like ctrl-click to add sync position to current played
+
+### DONE: 3GPP playback fix + robustness (new_txt_from_audio_GUI.py)
+- 3GPP/AMR/AAC/M4A/WMA/WebM/MKA/MP2/MPG/ADPCM-WAV playback: pygame failed with 'modplug_load failed'; the real format is sniffed and FFmpeg makes a cached temp WAV in the background (progress, Cancel, cleanup on exit).
+- Clear error with install hint when FFmpeg is missing; subprocess player failures are reported instead of looking like an instantly finished file.
+- Compressed WAV durations showed 0.0 (mutagen); 3GP durations read via MP4; implausible durations rejected.
+- Stop transcriber now ends the whole process tree (ASR/ffmpeg children kept running and the GUI stayed 'running').
+- Shortcuts bound on the editor too: Ctrl+O inserted a newline and marked the text unsaved.
+- Filter no longer rescans the folder per keystroke; empty folder resets the list; a file argument opens that file directly.
+- Non-UTF-8 transcripts decoded with the locale code page instead of replacement characters; saves are atomic.
+- Short duration estimates no longer cut playback; stopping a paused player no longer hangs; 'All files' shows extensionless files on Linux.
+- RF64/BW64 WAV signatures accepted (console + GUI parity). Tests: test_prompt/test_new_txt_from_audio_gui_playback.py.
+
+### DONE: GUI file-type parity + automatic sync helpers (new_txt_from_audio_GUI.py)
+file list and Open file... dialog now use the console extension set (+ signature
+sniffing), so nothing the console transcriber accepts is hidden; single files and
+subfolders can be opened. Auto-estimate asks ffmpeg silencedetect where the speech
+runs are and spreads words over those runs only; Fill from marks interpolates all
+words between Ctrl+click anchors (Ctrl+Shift+click pins and fills at once);
+double-click a pinned word to seek; reaction lead is a persisted spinbox;
+optional auto-align on load; per-user settings file. Dense marks now use one
+linear index<->offset pass instead of a Text.count per mark.
+Tests: test_prompt/test_new_txt_from_audio_gui.py
+
 
 ## DONE: implement new script
 open_file_via_http.py  (dev_helper/view/open_file_via_http.py)

@@ -35,7 +35,7 @@ So by default it will create files in folder where you put the script.
 | `new_img` | Create numbered placeholder color images with grid overlay. Useful for UI mockups and testing. |
 | `new_audio` | Generate sine wave audio files, choose req, notes or pentatonic scale quantization. wav, opus. |
 | `new_audio_sweep` | Generate frequency sweep audio files. Can quantize to pentatonic scale. |
-| `new_txt_from_audio` | Transcribe audio files/folders to adjacent `.txt` files using local audio.cpp and Qwen3-ASR GGUF. |
+| `new_txt_from_audio` | Transcribe audio files/folders, output - txt companions near input files, using local audio.cpp and Qwen3-ASR GGUF. |
 | `new_voice` | Create numbered speech files using text-to-speech (pytttsx3). wav, opus. |
 | `random_password` | Generate a random password and copy it to clipboard. |
 | `apply_LF_ending` | all ending linux type to save size. |
@@ -77,48 +77,3 @@ All scripts should use exactly same `command_paths.py` to get and resolve file l
 ## License
 
 MIT
-
-## Audio to text: `new_txt_from_audio.py`
-
-Uses the [audio.cpp CLI](https://github.com/0xShug0/audio.cpp) instead of a Python
-inference engine: native GGUF inference and long-audio chunking stay upstream,
-without adding PyTorch or a second implementation of Qwen3-ASR.
-
-Setup:
-1. Install/build `audiocpp_cli` with the `qwen3_asr` family enabled. Put it on
-   PATH, beside the script, or pass `--cli /path/to/audiocpp_cli`.
-2. Obtain a **Qwen3-ASR-1.7B GGUF compatible with audio.cpp**. GGUF files made for
-   another runtime are not necessarily compatible. See upstream's
-   [Qwen3 GGUF guide](https://github.com/0xShug0/audio.cpp/blob/main/docs/models/qwen3.md#gguf-checkpoints).
-   Pass its path with `--model`, set `QWEN3_ASR_MODEL`, or edit `MODEL` in settings.
-   CLI/clipboard paths are passed literally. In Python settings, write Windows paths
-   as raw strings (for example `r"D:\models\model.gguf"`) so `\` sequences are not
-   interpreted by Python.
-3. Install FFmpeg for MP3, FLAC, Ogg/Opus, M4A, AAC, 3GPP (`.3gp`, `.3gpp`,
-   `.3ga`), and other compressed audio (also for WAV that is not mono 16 kHz PCM16).
-   Inputs that need conversion are decoded to a temporary mono 16 kHz PCM WAV.
-   Use PATH or `--ffmpeg`. Already-compatible WAV needs no FFmpeg. No extra Python
-   packages are required for transcription; clipboard support uses the project's
-   usual optional helpers.
-
-```bash
-python dev_helper/new_file/new_txt_from_audio.py recording.wav --model /models/qwen3-asr-1.7b.gguf
-python dev_helper/new_file/new_txt_from_audio.py /recordings --model /models/qwen3-asr-1.7b.gguf --backend cuda
-python dev_helper/new_file/new_txt_from_audio.py --language English
-```
-
-The last example assumes the model is configured and resolves inputs from stdin,
-clipboard file references, the `PATH` setting, or CWD, just like the other scripts.
-Folder scans are recursive (`--no-recursive` disables this). Outputs are UTF-8
-companions: `recording.mp3` → `recording.txt`. Existing companions are skipped
-unless `--overwrite` is supplied; failed inference leaves old transcripts intact.
-Same-stem inputs sharing one companion are reported as conflicts rather than
-silently overwriting one another. Errors in one recording do not stop the rest;
-any error produces a nonzero exit status. Temporary converted WAVs are cleaned up.
-
-CPU is the portable default; `--backend cuda`, `vulkan`, `metal`, or `best` requires
-an appropriate audio.cpp build. Language detection is automatic unless `--language`
-is given. Nothing is downloaded automatically. Each recording starts a new CLI
-process and reloads the model (simple and portable, but slower for many short clips).
-`build.py` automatically discovers this script and bundles the shared path resolver
-for standalone use from any folder.

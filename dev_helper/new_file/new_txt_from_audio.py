@@ -1,10 +1,17 @@
 #!/usr/bin/env python3
-"""Create adjacent UTF-8 transcripts using audio.cpp's Qwen3-ASR CLI.
+"""Create adjacent UTF-8 transcripts using https://github.com/0xShug0/audio.cpp Qwen3-ASR CLI.
 
 Inputs: CLI paths -> stdin -> clipboard file references -> PATH -> cwd.
 Requires an audio.cpp-compatible Qwen3-ASR-1.7B GGUF and audiocpp_cli.
 FFmpeg is needed unless input is already mono 16 kHz PCM16 WAV.
-No models or executables are downloaded automatically.
+
+
+```bash
+python dev_helper/new_file/new_txt_from_audio.py recording.wav --model /models/qwen3-asr-1.7b.gguf
+python dev_helper/new_file/new_txt_from_audio.py /recordings --model /models/qwen3-asr-1.7b.gguf --backend cuda
+python dev_helper/new_file/new_txt_from_audio.py --language English
+```
+
 """
 
 # === SETTINGS START ===
@@ -22,6 +29,7 @@ OVERWRITE = False
 import argparse
 import os
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -36,6 +44,10 @@ from path_args import iter_existing_files, resolve_paths
 AUDIO_EXTENSIONS = {
     ".wav", ".wave", ".mp3", ".flac", ".ogg", ".opus", ".m4a", ".aac",
     ".wma", ".aiff", ".aif", ".aifc", ".alac", ".amr", ".mka", ".weba",
+    # MPEG-1/2 audio streams ("mpeg2 internally"), e.g. from dictation recorders.
+    ".mp1", ".mp2", ".mpa", ".m2a", ".mpga", ".adts",
+    # MPEG-1/2 audio/video containers; FFmpeg -vn keeps just the audio track.
+    ".mpeg", ".mpg", ".mpeg2", ".mpg2",
     # 3GPP audio/video containers are decoded by FFmpeg to the temporary WAV.
     ".3gp", ".3gpp", ".3ga", ".3g2", ".3gp2",
 }
@@ -76,10 +88,51 @@ def find_executable(value):
                        "or specify its full path.")
 
 
+def has_audio_signature(path):
+    """Content sniff for audio recordings whose name lacks a known extension.
+
+    Catches raw MPEG-1/2 audio streams, WAVE containers (whatever codec is
+    inside, including MPEG), and other common audio containers by magic bytes.
+    """
+    try:
+        with open(path, "rb") as handle:
+            head = handle.read(16)
+    except OSError:
+        return False
+    if len(head) < 4:
+        return False
+    # WAVE container: RIFF/RIFX/RF64/BW64 + "WAVE". Inner codec may be PCM, MPEG, ...
+    # ("rf64" is kept for files written by tools that got the case wrong.)
+    if head[8:12] == b"WAVE" and head[:4] in (b"RIFF", b"RIFX", b"RF64", b"rf64", b"BW64"):
+        return True
+    if head[:4] in (b"fLaC", b"OggS", b".snd", b"MAC ", b"wvpk", b"TTA1"):
+        return True
+    if head[:4] == b"FORM" and head[8:12] in (b"AIFF", b"AIFC"):
+        return True
+    if head[:4] == b"#!AM":  # #!AMR or #!AMR-WB
+        return True
+    if head[:8] == bytes.fromhex("3026b2758e66cf11"):  # ASF: wma/wmv
+        return True
+    if head[:8] == bytes.fromhex("3666666611cf11a0"):  # Sony Wave64
+        return True
+    # MP4-family audio (M4A/M4B) and 3GPP brands; video-only brands are skipped.
+    if head[4:8] == b"ftyp" and (head[8:12] in (b"M4A ", b"M4B ", b"M4P ")
+                                 or head[8:12][:2] == b"3g"):
+        return True
+    if head[:3] == b"ID3":  # tagged MP3 (possibly with MPEG-2 audio)
+        return True
+    if head[0] == 0xFF and (head[1] & 0xF0) == 0xF0:
+        return True  # MPEG audio (MP1/MP2/MP3) or ADTS AAC frame sync
+    if head[:3] == b"\x00\x00\x01":
+        return True  # MPEG program / elementary stream start code
+    return False
+
+
 def collect_audio_files(paths, recursive=True):
     seen = set()
     for path in iter_existing_files(paths, recursive=recursive):
-        if path.suffix.lower() not in AUDIO_EXTENSIONS:
+        if (path.suffix.lower() not in AUDIO_EXTENSIONS
+                and not has_audio_signature(path)):
             continue
         key = os.path.normcase(str(path.resolve()))
         if key not in seen:
@@ -92,7 +145,9 @@ def is_ready_wav(path):
         with wave.open(str(path), "rb") as audio:
             return (audio.getnchannels() == 1 and audio.getframerate() == 16000
                     and audio.getsampwidth() == 2 and audio.getcomptype() == "NONE")
-    except (wave.Error, EOFError):
+    except (wave.Error, EOFError, OSError, ValueError, struct.error):
+        # Not plain PCM (e.g. WAVE with an MPEG codec) or a broken header:
+        # treat as needing FFmpeg conversion instead of failing the scan.
         return False
 
 

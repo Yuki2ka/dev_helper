@@ -1,6 +1,7 @@
 """Offline wrapper tests; no model or GPU required."""
 import ctypes
 import importlib.util
+import struct
 import tempfile
 import unittest
 import wave
@@ -111,6 +112,59 @@ class AudioTranscriptTests(unittest.TestCase):
         self.assertIn("pcm_s16le", commands[0])
         self.assertEqual(commands[1][-2:], ["--language", "English"])
         self.assertFalse(Path(commands[0][-1]).exists())
+
+    def test_mpeg_audio_extensions_are_collected(self):
+        names = ["dictation.mp2", "dictation.mpa", "dictation.m2a",
+                 "dictation.mpga", "dictation.adts", "clip.mpeg", "clip.mpg",
+                 "clip.mpeg2", "clip.mpg2"]
+        for name in names:
+            (self.root / name).touch()
+        found = {p.name for p in script.collect_audio_files([self.root], False)}
+        for name in names:
+            self.assertIn(name, found)
+
+    def test_mpeg_codec_wav_is_not_ready_and_is_converted(self):
+        # WAV container carrying MPEG audio (fmt tag 0x55), as dictation
+        # recorders write it. wave.py rejects it; FFmpeg must decode it.
+        source = self.root / "dictation.wav"
+        fmt = struct.pack("<HHIIHH", 85, 1, 16000, 4000, 1, 0)
+        frames = b"\xff\xfb\x90\x64" * 8
+        body = (b"fmt " + struct.pack("<I", len(fmt)) + fmt
+                + b"data" + struct.pack("<I", len(frames)) + frames)
+        source.write_bytes(b"RIFF" + struct.pack("<I", 4 + len(body)) + b"WAVE" + body)
+
+        self.assertEqual(list(script.collect_audio_files([source])), [source])
+        self.assertFalse(script.is_ready_wav(source))
+
+        commands = []
+
+        def run(command):
+            commands.append(command)
+            if "--text-out" in command:
+                self.fake_cli(command)
+
+        with patch.object(script, "run_command", side_effect=run), \
+                patch.object(script, "find_executable", return_value="ffmpeg"):
+            script.transcribe(source, self.target, self.args, "cli", self.model)
+        self.assertEqual(len(commands), 2)
+        self.assertIn("pcm_s16le", commands[0])
+        self.assertEqual(self.target.read_text(encoding="utf-8"), "Hello 世界\n")
+
+    def test_unknown_names_collected_by_content_signature(self):
+        riff = self.root / "recording 2024-01-01"  # no extension at all
+        riff.write_bytes(b"RIFF\x24\x00\x00\x00WAVEfmt " + b"\x00" * 20)
+        mpeg_stream = self.root / "voice.mpeg2.data"  # odd suffix, MPEG sync
+        mpeg_stream.write_bytes(b"\xff\xfb\x90\x64\x00\x00\x00\x00")
+        tagged_mp3 = self.root / "memo.bin"
+        tagged_mp3.write_bytes(b"ID3\x04\x00\x00\x00\x00\x00\x00" + b"\x00" * 8)
+        notes = self.root / "notes.txt"
+        notes.write_text("hello", encoding="utf-8")
+
+        found = set(script.collect_audio_files([self.root], False))
+        self.assertIn(riff, found)
+        self.assertIn(mpeg_stream, found)
+        self.assertIn(tagged_mp3, found)
+        self.assertNotIn(notes, found)
 
     def test_3gpp_audio_is_collected_and_converted(self):
         source = self.root / "mobile recording.3gpp"
