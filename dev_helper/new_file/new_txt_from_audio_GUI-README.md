@@ -51,7 +51,10 @@ files*; a file that does not look like audio asks for confirmation first.
 
 `test_prompt/test_new_txt_from_audio_gui.py` asserts that the GUI extension
 set stays a superset of the console one, so the two cannot drift apart
-silently.
+silently. `test_prompt/test_new_txt_from_audio_gui_playback.py` covers format
+sniffing, the FFmpeg conversion, the player and the background playback
+flow; its FFmpeg/pygame end-to-end tests skip themselves when those are
+not installed.
 
 **Subfolders** (off by default) scans recursively and shows the relative
 path of every hit; the transcriber button respects the same switch.
@@ -65,15 +68,48 @@ first backend that is available:
 | Windows | MCI (`mciSendString`) | yes | yes |
 | Linux/macOS | `ffplay` or `mpv` | yes | yes (POSIX signal) |
 | macOS | `afplay` | no | yes (POSIX signal) |
-| Linux | `paplay`/`aplay` (wav only) | no | yes (POSIX signal) |
+| Linux | `paplay`/`aplay` (WAV; other files get a WAV copy) | no | yes (POSIX signal) |
+| Linux/macOS | `mpg123` (MPEG audio only) | no | yes (POSIX signal) |
 
 **Tools -> Install audio support (pygame)** installs `pygame` and `mutagen`
 into `libs/` next to the script (portable, never touches the OS Python).
 `mutagen` only makes duration detection fast; without it, durations come
-from `wave`/`ffprobe`/pygame.
+from `wave`/`ffprobe`/`ffmpeg`/pygame.
 
 If no backend exists, the list, the transcriber button, saving and the
 sync editor still work; only playback is disabled.
+
+### 3GP, AMR, AAC and other formats the backend cannot decode
+
+pygame's SDL_mixer decodes only PCM/float WAV, AIFF, FLAC, MP3 and Ogg
+Vorbis/Opus. Everything else (3GPP phone recordings with AMR or AAC, `.amr`,
+`.m4a`/`.mp4`, raw `.aac`, `.wma`, `.webm`/`.mka`, `.mp2`, `.mpg`, ADPCM or
+MP3-in-WAV) used to fail with `pygame could not play this file.
+modplug_load failed` (Windows) or `Failed loading libmodplug.so.1` (Linux):
+SDL_mixer hands data it does not recognise to its MOD-tracker decoder.
+
+The editor now reads the real format from the first bytes of the file (the
+extension is not trusted, so extensionless recordings work too). When the
+backend cannot decode it, FFmpeg converts it once to a temporary 16-bit PCM
+WAV:
+
+* The conversion runs in the background when you press **Play**. The status
+  bar shows the progress and the button reads **Cancel** meanwhile;
+  selecting another file cancels it. A one-hour AMR call takes about 5 s.
+* Seeking, pausing, the clock and karaoke sync use the WAV copy, so they
+  behave exactly like with a native WAV. The backend label adds
+  `(WAV copy by FFmpeg)`.
+* The most recent copies are kept in a temporary folder
+  (`new_txt_from_audio_GUI-playback-*`), so switching back is instant. The
+  folder is deleted on exit; folders left behind by a crash are removed the
+  next time a copy is made.
+* `FFMPEG` (a name or full path) is looked up next to the script first, then
+  on `PATH`. Without FFmpeg the error dialog says what to install; formats
+  the backend plays natively are not affected.
+
+Windows MCI plays WAV (including ADPCM), AIFF, AU, MP3/MP2 and WMA itself.
+`ffplay`/`mpv` play everything directly and never need a copy; `aplay` and
+`paplay` get a WAV copy for anything that is not WAV.
 
 ## The companion text file and the transcriber
 
@@ -266,13 +302,16 @@ is the practical path.
 | `AUDIO_EXTENSIONS` | Files shown in the list (kept in sync with the console) |
 | `AUDIO_EXTENSION_GROUPS` | Groups offered by the file dialog |
 | `SPEECH_ALIGNMENT` / `SPEECH_NOISE_DB` / `SPEECH_MIN_SILENCE_SECONDS` | FFmpeg silencedetect tuning for the automatic estimate |
+| `FFMPEG` / `FFPROBE` | FFmpeg tools (name or full path) for playback copies, durations and the speech estimate; looked up next to the script, then on `PATH` |
+| `PLAYBACK_CACHE_FILES` | How many converted WAV copies are kept while the editor runs |
 | `ANCHOR_TAG_LIMIT` | Above this many marks the anchor background is skipped (the karaoke highlight stays) |
 | `POLL_INTERVAL_MS` | Refresh rate of the clock and highlight |
 
 Keyboard shortcuts: `Ctrl+O` open folder, `Ctrl+Shift+O` open an audio
 file, `Ctrl+S` save text, `Ctrl+R` fill from marks, `Ctrl+Space`
 play/pause, `Ctrl+click` add sync mark, `Ctrl+Shift+click` add and fill,
-`Ctrl+right-click` remove sync mark.
+`Ctrl+right-click` remove sync mark. The shortcuts also work while the
+cursor is in the text editor (`Ctrl+O` used to insert a line break there).
 
 Settings (last folder, reaction time, follow playback, subfolders,
 auto-align on load) are
@@ -296,6 +335,10 @@ it, for example to keep the settings on the same SD card as the scripts.
   in that case.
 * The GUI assumes one text file per audio file, next to it. Subfolders are
   optional; the companion text is always written beside its audio file.
-* The speech-aware estimate needs `ffmpeg` on `PATH`; without it the
+* Formats the audio backend cannot decode (3GP, AMR, AAC/M4A, WMA,
+  WebM...) need FFmpeg for playback. The first **Play** of such a file
+  waits for the conversion; later plays reuse the copy.
+* The speech-aware estimate needs `ffmpeg` next to the script or on
+  `PATH`; without it the
   estimate is word-length based only. It is still an estimate: it knows
   where speech happens, not which word is spoken.

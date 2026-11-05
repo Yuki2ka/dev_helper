@@ -23,16 +23,24 @@ same extension set as the console script ``new_txt_from_audio.py`` (plus
 content sniffing), so every file the console accepts is also listed here.
 
 Playback needs no third-party package: pygame is used when available
-(best seeking), otherwise a platform player (Windows MCI, afplay on
-macOS, ffplay/mpv/mpg123/paplay/aplay on Linux). Tools -> Install audio
+(best seeking), otherwise a platform player (Windows MCI, ffplay/mpv,
+afplay on macOS, paplay/aplay/mpg123 on Linux). Tools -> Install audio
 support can install pygame into ./libs beside this script.
 
+Formats the chosen backend cannot decode itself (pygame/SDL_mixer has no
+3GP, AMR, AAC/M4A, WMA, WebM or MP2 decoder and used to fail with
+"modplug_load failed") are converted once with FFmpeg into a temporary
+WAV, in the background, and that copy is played instead.
+
 Run:
-    python new_txt_from_audio_GUI.py [folder]
+    python new_txt_from_audio_GUI.py [folder-or-file]
 """
 
+import atexit
 import bisect
+import collections
 import json
+import locale
 import os
 import queue
 import re
@@ -40,9 +48,11 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import unicodedata
+import wave
 
 from pathlib import Path
 
@@ -56,11 +66,11 @@ try:
     TK_AVAILABLE = True
 except ImportError:
     # Keep the audio/sync helpers importable in headless Python builds.
-    tk = None
-    filedialog = None
-    messagebox = None
-    ttk = None
-    ScrolledText = None
+    tk = None  # type: ignore[assignment]
+    filedialog = None  # type: ignore[assignment]
+    messagebox = None  # type: ignore[assignment]
+    ttk = None  # type: ignore[assignment]
+    ScrolledText = None  # type: ignore[assignment,misc]
     TK_AVAILABLE = False
 
 # ------------------------------------------------------------
@@ -78,6 +88,20 @@ TRANSCRIBER_SCRIPT = APP_DIR / "new_txt_from_audio.py"
 # The default passes the selected audio file; most CLI transcribers accept
 # that. Use [] if the script only scans its own folder.
 TRANSCRIBER_ARGS = ["{audio}"]
+
+# FFmpeg decodes what the audio backend cannot (3GP/AMR/AAC/M4A/WMA/WebM/
+# MP2...) into a temporary WAV for playback, and finds speech pauses for
+# Auto-estimate. A name on PATH, a file next to this script, or a full path
+# (raw string on Windows: r"D:\tools\ffmpeg.exe"). ffprobe is looked up the
+# same way, and next to FFMPEG when it is a path.
+FFMPEG = "ffmpeg"
+FFPROBE = "ffprobe"
+
+# Converted playback copies are kept for this many recent files (per GUI
+# session, in the system temp folder) and deleted when the GUI closes.
+PLAYBACK_CACHE_FILES = 3
+# Leftover playback folders of crashed sessions are removed after this age.
+PLAYBACK_STALE_SECONDS = 24 * 3600
 
 # Kept in sync with new_txt_from_audio.py (AUDIO_EXTENSIONS): the test suite
 # asserts that this set is a superset, so the GUI can never hide a file the
@@ -152,7 +176,8 @@ COLOR_ANCHOR = "#cfe3ff"
 NO_ENGINE_MESSAGE = (
     "No audio backend is available on this system.\n\n"
     "Install pygame (Tools -> Install audio support) or install a command "
-    "line player such as ffplay or mpv."
+    "line player such as ffplay (part of FFmpeg) or mpv. With FFmpeg "
+    "installed, pygame also plays 3GP, AMR, AAC/M4A and WMA recordings."
 )
 
 # Add a local libs folder so a portable pygame install is picked up.
@@ -205,15 +230,68 @@ def human_size(size):
     return f"{size:.1f} GB"
 
 
+def decode_text(data):
+    """Return (text, encoding) for transcript bytes, newlines normalised.
+
+    UTF-8 is expected (the transcriber writes it). Older files in the
+    system code page (cp1251, cp1252...) are decoded with that code page
+    instead of turning every non-ASCII letter into U+FFFD, which a later
+    save would have written back, destroying the original text.
+    """
+    encodings = ["utf-8"]
+    preferred = locale.getpreferredencoding(False) or ""
+    if preferred and preferred.lower().replace("-", "").replace("_", "") != "utf8":
+        encodings.append(preferred)
+    for encoding in encodings:
+        try:
+            text = data.decode(encoding)
+        except (UnicodeDecodeError, LookupError):
+            continue
+        break
+    else:
+        encoding = "utf-8 (invalid bytes replaced)"
+        text = data.decode("utf-8", errors="replace")
+    # Same newline handling as text-mode reading: CRLF/CR become LF.
+    return text.replace("\r\n", "\n").replace("\r", "\n"), encoding
+
+
+def read_text_with_encoding(path):
+    return decode_text(Path(path).read_bytes())
+
+
 def read_text(path):
-    return Path(path).read_text(encoding="utf-8", errors="replace")
+    return read_text_with_encoding(path)[0]
 
 
 def write_text(path, text):
+    """Write UTF-8 with LF endings; replace the old file only when complete.
+
+    A full disk or a crash mid-write used to leave a truncated transcript.
+    """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w", encoding="utf-8", newline="\n") as handle:
-        handle.write(text)
+    staged = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        with open(staged, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(text)
+        try:
+            shutil.copymode(path, staged)
+        except OSError:
+            pass
+        try:
+            os.replace(staged, path)
+            return
+        except OSError:
+            # Windows refuses to replace a file another program holds open;
+            # fall back to writing it in place.
+            pass
+        with open(path, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(text)
+    finally:
+        try:
+            staged.unlink()
+        except OSError:
+            pass
 
 
 def console_python():
@@ -230,6 +308,110 @@ def console_python():
     return str(executable)
 
 
+def hidden_process_flags():
+    """creationflags that stop console windows flashing up on Windows.
+
+    Without it every ffprobe/ffmpeg/ffplay call opens a black console window
+    when the GUI runs under pythonw.exe.
+    """
+    if sys.platform == "win32":
+        return getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    return 0
+
+
+def tree_popen_options():
+    """Popen options that make a child the root of its own process tree."""
+    if sys.platform == "win32":
+        return {"creationflags": hidden_process_flags()}
+    return {"start_new_session": True}
+
+
+def _group_alive(pgid):
+    try:
+        os.killpg(pgid, 0)
+        return True
+    except (OSError, AttributeError):
+        return False
+
+
+def stop_process_tree(process, grace=2.0, wait=False):
+    """Stop a child and everything it started (ffmpeg, audiocpp_cli, ...).
+
+    Terminating only the Python child left the ASR/FFmpeg grandchildren
+    running: they kept the GPU busy and held the log pipe open, so the GUI
+    still showed the run as active. POSIX children started with
+    tree_popen_options() get SIGINT first (the console script then removes
+    its temp folder), then SIGTERM and SIGKILL; Windows uses taskkill /T.
+    Without ``wait`` the escalation runs in a daemon thread.
+    """
+    if process is None or process.poll() is not None:
+        return
+    if sys.platform == "win32":
+        def kill_tree():
+            try:
+                subprocess.run(
+                    ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL, timeout=15, check=False,
+                    creationflags=hidden_process_flags(),
+                )
+            except (OSError, subprocess.SubprocessError):
+                pass
+            if process.poll() is None:
+                try:
+                    process.kill()
+                except OSError:
+                    pass
+        if wait:
+            kill_tree()
+        else:
+            threading.Thread(target=kill_tree, daemon=True).start()
+        return
+
+    # Remember the group now: once the leader has exited, getpgid() fails
+    # but grandchildren can still be signalled through the group id.
+    pgid = None
+    try:
+        if os.getpgid(process.pid) == process.pid:
+            pgid = process.pid
+    except (OSError, AttributeError):
+        pgid = None
+
+    def send(signum):
+        if pgid is not None:
+            try:
+                os.killpg(pgid, signum)
+                return
+            except OSError:
+                pass
+        if process.poll() is None:
+            try:
+                process.send_signal(signum)
+            except OSError:
+                pass
+
+    def alive():
+        if process.poll() is None:
+            return True
+        return pgid is not None and _group_alive(pgid)
+
+    send(signal.SIGINT)
+
+    def escalate():
+        for signum in (signal.SIGTERM, signal.SIGKILL):
+            deadline = time.monotonic() + max(0.0, grace)
+            while time.monotonic() < deadline:
+                if not alive():
+                    return
+                time.sleep(0.05)
+            send(signum)
+
+    if wait:
+        escalate()
+    else:
+        threading.Thread(target=escalate, daemon=True).start()
+
+
 def companion_path(audio_path, suffix):
     """a/b/song.mp3 + '.txt' -> a/b/song.txt"""
     audio_path = Path(audio_path)
@@ -242,6 +424,13 @@ def natural_key(value):
         (0, int(chunk)) if chunk.isdigit() else (1, chunk.lower())
         for chunk in re.split(r"(\d+)", str(value)) if chunk
     ]
+
+
+# RIFF and its big-endian/64-bit relatives (EBU RF64, ITU BW64). "rf64" is
+# kept for files written by tools that got the case wrong.
+WAVE_MAGICS = (b"RIFF", b"RIFX", b"RF64", b"rf64", b"BW64")
+ASF_MAGIC = bytes.fromhex("3026b2758e66cf11")
+WAVE64_MAGIC = bytes.fromhex("3666666611cf11a0")
 
 
 def has_audio_signature(path):
@@ -258,8 +447,8 @@ def has_audio_signature(path):
         return False
     if len(head) < 4:
         return False
-    # WAVE container: RIFF/RIFX/rf64 + "WAVE". Inner codec may be PCM, MPEG, ...
-    if head[8:12] == b"WAVE" and head[:4] in (b"RIFF", b"RIFX", b"rf64"):
+    # WAVE container: RIFF/RIFX/RF64/BW64 + "WAVE". Inner codec may be PCM, MPEG, ...
+    if head[8:12] == b"WAVE" and head[:4] in WAVE_MAGICS:
         return True
     if head[:4] in (b"fLaC", b"OggS", b".snd", b"MAC ", b"wvpk", b"TTA1"):
         return True
@@ -267,9 +456,9 @@ def has_audio_signature(path):
         return True
     if head[:4] == b"#!AM":  # #!AMR or #!AMR-WB
         return True
-    if head[:8] == bytes.fromhex("3026b2758e66cf11"):  # ASF: wma/wmv
+    if head[:8] == ASF_MAGIC:  # ASF: wma/wmv
         return True
-    if head[:8] == bytes.fromhex("3666666611cf11a0"):  # Sony Wave64
+    if head[:8] == WAVE64_MAGIC:  # Sony Wave64
         return True
     # MP4-family audio (M4A/M4B) and 3GPP brands; video-only brands are skipped.
     if head[4:8] == b"ftyp" and (head[8:12] in (b"M4A ", b"M4B ", b"M4P ")
@@ -288,6 +477,176 @@ def looks_like_audio(path):
     """True when the extension or the first bytes say this is audio."""
     path = Path(path)
     return path.suffix.lower() in AUDIO_EXTENSIONS or has_audio_signature(path)
+
+
+# ------------------------------------------------------------
+# Playback formats
+# ------------------------------------------------------------
+
+# Readable names for the kinds returned by sniff_audio_kind().
+AUDIO_KIND_LABELS = {
+    "wav": "PCM WAV",
+    "wav-codec": "compressed WAV (ADPCM/MP3/GSM/A-law)",
+    "aiff": "AIFF",
+    "aifc": "AIFF-C",
+    "flac": "FLAC",
+    "ogg-vorbis": "Ogg Vorbis",
+    "ogg-opus": "Opus",
+    "ogg-flac": "Ogg FLAC",
+    "ogg-speex": "Speex",
+    "ogg": "Ogg",
+    "mp3": "MP3",
+    "mpeg-audio": "MPEG-1/2 Layer I/II (MP1/MP2)",
+    "adts": "AAC (ADTS)",
+    "mp4": "MP4/M4A",
+    "3gp": "3GPP",
+    "amr": "AMR",
+    "asf": "WMA/ASF",
+    "matroska": "WebM/Matroska",
+    "mpeg-ps": "MPEG program stream",
+    "wave64": "Wave64",
+    "au": "Sun AU",
+    "ape": "Monkey's Audio",
+    "wavpack": "WavPack",
+    "tta": "TTA",
+    "caf": "Core Audio (CAF)",
+    "midi": "MIDI",
+}
+
+# What pygame's SDL_mixer decodes by itself in every pygame 2 build.
+# Anything else (3GP, AMR, AAC/M4A, WMA, WebM, MP2, ADPCM WAV...) is not
+# recognised and SDL_mixer falls back to tracker music: "modplug_load
+# failed" / "Failed loading libmodplug". MPEG program streams even "load"
+# and then play noise, because the .mpg name forces the MP3 decoder.
+PYGAME_NATIVE_KINDS = frozenset({
+    "wav", "aiff", "flac", "mp3", "ogg-vorbis", "ogg-opus",
+})
+
+# Windows MCI: waveaudio (with the ACM codecs) and DirectShow mpegvideo.
+MCI_NATIVE_KINDS = frozenset({
+    "wav", "wav-codec", "aiff", "au", "mp3", "mpeg-audio", "asf",
+})
+
+
+def _sniff_mpeg_frame(header):
+    """Classify an MPEG audio / ADTS frame header, or return None."""
+    if len(header) < 2 or header[0] != 0xFF or (header[1] & 0xE0) != 0xE0:
+        return None
+    layer = (header[1] >> 1) & 0x03
+    if layer == 0:
+        # ADTS AAC has a 12-bit sync word and layer bits 00.
+        return "adts" if (header[1] & 0xF0) == 0xF0 else None
+    if (header[1] >> 3) & 0x03 == 0x01:   # reserved MPEG version
+        return None
+    return "mp3" if layer == 1 else "mpeg-audio"
+
+
+def _wave_codec_kind(head):
+    """'wav' for PCM/float WAVE data, 'wav-codec' for compressed WAVE data."""
+    position = 12
+    while position + 8 <= len(head):
+        chunk = head[position:position + 4]
+        size = int.from_bytes(head[position + 4:position + 8], "little")
+        if chunk == b"fmt ":
+            body = head[position + 8:position + 8 + min(size, 40)]
+            if len(body) < 2:
+                break
+            tag = int.from_bytes(body[:2], "little")
+            if tag == 0xFFFE and len(body) >= 26:   # WAVE_FORMAT_EXTENSIBLE
+                tag = int.from_bytes(body[24:26], "little")
+            return "wav" if tag in (1, 3) else "wav-codec"
+        position += 8 + size + (size & 1)
+    return "wav"
+
+
+def sniff_audio_kind(path):
+    """Container/codec family of an audio file from its bytes, or None.
+
+    The extension is not trusted: phone recorders write AAC into ".3gpp",
+    dictation devices write MPEG audio into ".wav", and extensionless
+    files are allowed. The kind decides whether a playback backend can read
+    the file itself or needs a converted WAV.
+    """
+    try:
+        with open(path, "rb") as handle:
+            head = handle.read(65536)
+            if head[:3] == b"ID3" and len(head) >= 10:
+                # Skip (possibly stacked) ID3v2 tags to reach the audio frame.
+                offset = 0
+                frame = head
+                for _ignored in range(3):
+                    if frame[:3] != b"ID3" or len(frame) < 10:
+                        break
+                    size = ((frame[6] & 0x7F) << 21 | (frame[7] & 0x7F) << 14
+                            | (frame[8] & 0x7F) << 7 | (frame[9] & 0x7F))
+                    offset += 10 + size + (10 if frame[5] & 0x10 else 0)
+                    handle.seek(offset)
+                    frame = handle.read(64)
+                frame = frame.lstrip(b"\x00")
+                if frame[:4] == b"fLaC":
+                    return "flac"
+                return _sniff_mpeg_frame(frame[:4]) or "mp3"
+    except OSError:
+        return None
+    if len(head) < 4:
+        return None
+    magic = head[:4]
+    if magic in WAVE_MAGICS and head[8:12] == b"WAVE":
+        return _wave_codec_kind(head) if magic == b"RIFF" else "wav-codec"
+    if magic == b"FORM" and head[8:12] in (b"AIFF", b"AIFC"):
+        return "aiff" if head[8:12] == b"AIFF" else "aifc"
+    if magic == b"fLaC":
+        return "flac"
+    if magic == b"OggS":
+        start = 27 + (head[26] if len(head) > 26 else 0)
+        packet = head[start:start + 8]
+        for prefix, kind in ((b"\x01vorbis", "ogg-vorbis"), (b"OpusHead", "ogg-opus"),
+                             (b"\x7fFLAC", "ogg-flac"), (b"Speex", "ogg-speex")):
+            if packet.startswith(prefix):
+                return kind
+        return "ogg"
+    if head[4:8] == b"ftyp":
+        return "3gp" if head[8:10] == b"3g" else "mp4"
+    if head[4:8] in (b"moov", b"mdat", b"free", b"wide", b"skip"):
+        return "mp4"   # QuickTime-style MP4 without a leading ftyp box
+    if head[:5] == b"#!AMR":
+        return "amr"
+    if head[:8] == ASF_MAGIC:
+        return "asf"
+    if magic == b"\x1aE\xdf\xa3":
+        return "matroska"
+    if head[:8] == WAVE64_MAGIC:
+        return "wave64"
+    simple = {b".snd": "au", b"MAC ": "ape", b"wvpk": "wavpack",
+              b"TTA1": "tta", b"caff": "caf", b"MThd": "midi"}
+    if magic in simple:
+        return simple[magic]
+    if head[:3] == b"\x00\x00\x01":
+        return "mpeg-ps"
+    return _sniff_mpeg_frame(head[:4])
+
+
+def describe_audio_kind(kind, path=None):
+    """'3GPP (.3gpp)' style label for messages."""
+    label = AUDIO_KIND_LABELS.get(kind, "this audio format")
+    suffix = Path(path).suffix.lower() if path else ""
+    return f"{label} ({suffix})" if suffix else label
+
+
+def engine_needs_conversion(engine, kind):
+    """True when ``engine`` is known not to decode files of ``kind`` itself.
+
+    ``engine.native_kinds`` is None for players that read everything
+    FFmpeg reads (ffplay, mpv). Unknown kinds are tried directly, except on
+    players that report failures only after the fact (``strict_formats``).
+    Converting is pointless when the engine cannot play WAV either.
+    """
+    native = getattr(engine, "native_kinds", None)
+    if native is None or "wav" not in native:
+        return False
+    if kind is None:
+        return bool(getattr(engine, "strict_formats", False))
+    return kind not in native
 
 
 def _walk_audio(folder, recursive, found, seen):
@@ -347,7 +706,8 @@ def audio_filetypes():
         allowed = [extension for extension in group if extension in AUDIO_EXTENSIONS]
         if allowed:
             types.append((label, patterns(allowed)))
-    types.append(("All files", "*.*"))
+    # "*.*" alone hides extensionless recordings in Tk's X11 dialog.
+    types.append(("All files", "* *.*"))
     return types
 
 
@@ -820,16 +1180,64 @@ class PlaybackError(RuntimeError):
     pass
 
 
+class ConversionRequired(PlaybackError):
+    """The backend cannot read the file; FFmpeg must make a WAV copy first.
+
+    Raised by AudioPlayer when it was asked not to convert on the calling
+    (UI) thread, so the caller can run the conversion in the background.
+    """
+
+
+class PlaybackCancelled(PlaybackError):
+    """A playback conversion was cancelled (another file was selected)."""
+
+
 def find_program(*names):
+    """First of ``names`` found next to this script or on PATH."""
     for name in names:
+        candidates = [name]
+        if sys.platform == "win32" and not name.lower().endswith(".exe"):
+            candidates.append(name + ".exe")
+        for candidate in candidates:
+            local = APP_DIR / candidate
+            if local.is_file():
+                return str(local)
         path = shutil.which(name)
         if path:
             return path
     return None
 
 
+def find_tool(setting):
+    """Resolve a tool setting: an explicit path, a file beside this script,
+    or a name on PATH (the same rules as the console transcriber)."""
+    if not setting:
+        return None
+    value = os.path.expanduser(str(setting))
+    if os.path.dirname(value) and Path(value).is_file():
+        return str(Path(value))
+    return find_program(value)
+
+
+def find_ffmpeg():
+    return find_tool(FFMPEG)
+
+
+def find_ffprobe():
+    tool = find_tool(FFPROBE)
+    if tool:
+        return tool
+    ffmpeg = find_ffmpeg()
+    if ffmpeg:
+        # A full FFMPEG path usually has ffprobe right beside it.
+        suffix = ".exe" if ffmpeg.lower().endswith(".exe") else ""
+        sibling = Path(ffmpeg).with_name("ffprobe" + suffix)
+        if sibling.is_file():
+            return str(sibling)
+    return None
+
+
 def _duration_wave(path):
-    import wave
     with wave.open(str(path), "rb") as handle:
         frames = handle.getnframes()
         rate = handle.getframerate()
@@ -838,24 +1246,70 @@ def _duration_wave(path):
     return None
 
 
+def wave_duration(path):
+    """Duration of a PCM WAV, or None (never raises)."""
+    try:
+        value = _duration_wave(path)
+    except (OSError, EOFError, wave.Error, ValueError):
+        return None
+    return value if value and value > 0 else None
+
+
 def _duration_ffprobe(path):
-    tool = find_program("ffprobe")
+    tool = find_ffprobe()
     if not tool:
         return None
     result = subprocess.run(
         [tool, "-v", "error", "-show_entries", "format=duration",
          "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
-        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-        text=True, timeout=15,
+        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL, text=True, timeout=15,
+        creationflags=hidden_process_flags(),
     )
     if result.returncode != 0:
         return None
     return float(result.stdout.strip())
 
 
-def _duration_mutagen(path):
+FFMPEG_DURATION_RE = re.compile(r"Duration:\s*(\d+):(\d{2}):(\d{2}(?:\.\d+)?)")
+
+
+def parse_ffmpeg_duration(output):
+    """Seconds from the 'Duration: 00:01:02.50' line of ``ffmpeg -i``."""
+    match = FFMPEG_DURATION_RE.search(str(output or ""))
+    if not match:
+        return None
+    hours, minutes, seconds = match.groups()
+    value = int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+    return value if value > 0 else None
+
+
+def _duration_ffmpeg(path):
+    """Duration from ``ffmpeg -i`` for setups that ship ffmpeg without ffprobe."""
+    tool = find_ffmpeg()
+    if not tool:
+        return None
+    result = subprocess.run(
+        [tool, "-hide_banner", "-nostdin", "-i", str(path)],
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE, text=True, errors="replace", timeout=15,
+        creationflags=hidden_process_flags(),
+    )
+    # "At least one output file must be specified" makes the exit code 1.
+    return parse_ffmpeg_duration(result.stderr)
+
+
+def _duration_mutagen(path, kind=None):
     from mutagen import File as MutagenFile
     audio = MutagenFile(str(path))
+    if audio is None and kind in ("mp4", "3gp"):
+        # mutagen.File() does not pick its MP4 reader for .3gp/.3gpp names
+        # (or files without an extension), although that reader handles them.
+        from mutagen.mp4 import MP4
+        audio = MP4(str(path))
+    elif audio is None and kind == "adts":
+        from mutagen.aac import AAC
+        audio = AAC(str(path))
     if audio is not None and getattr(audio, "info", None) is not None:
         return float(audio.info.length)
     return None
@@ -902,19 +1356,45 @@ def _duration_pygame(path):
     return float(sound.get_length())
 
 
-def detect_duration(path):
-    """Best-effort duration in seconds, or None."""
-    for probe in (_duration_wave, _duration_ffprobe, _duration_mutagen,
-                  _duration_mci, _duration_pygame):
+# No real recording needs more than this; a probe that implies it misread
+# the file (e.g. a WAV header of compressed data read as PCM).
+MAX_PLAUSIBLE_BITRATE = 100_000_000
+
+
+def detect_duration(path, kind=None):
+    """Best-effort duration in seconds, or None.
+
+    In-process readers come first (wave, mutagen), then FFmpeg tools, then
+    the platform/pygame fallbacks. mutagen is skipped where it reports
+    nonsense: MPEG program streams (its MP3 reader invents a length) and
+    compressed WAV (ADPCM/MP3 data measured as PCM: a few milliseconds).
+    """
+    if kind is None:
+        kind = sniff_audio_kind(path)
+    try:
+        size = Path(path).stat().st_size
+    except OSError:
+        size = 0
+    probes = [_duration_wave]
+    if kind not in ("mpeg-ps", "wav-codec"):
+        probes.append(lambda target: _duration_mutagen(target, kind))
+    probes.extend([_duration_ffprobe, _duration_ffmpeg, _duration_mci])
+    if kind is None or kind in PYGAME_NATIVE_KINDS:
+        probes.append(_duration_pygame)
+    for probe in probes:
         try:
             value = probe(path)
         except Exception:
             continue
         try:
-            if value and float(value) > 0:
-                return float(value)
+            value = float(value) if value else 0.0
         except (TypeError, ValueError):
             continue
+        if value <= 0:
+            continue
+        if size and size * 8 / value > MAX_PLAUSIBLE_BITRATE:
+            continue
+        return value
     return None
 
 
@@ -990,7 +1470,7 @@ def detect_speech_segments(path, duration=None, ffmpeg=None,
     if not SPEECH_ALIGNMENT:
         return []
     if ffmpeg is None:
-        tool = find_program("ffmpeg")
+        tool = find_ffmpeg()
     else:
         tool = ffmpeg
     if not tool:
@@ -1018,6 +1498,7 @@ def detect_speech_segments(path, duration=None, ffmpeg=None,
             text=True,
             errors="replace",
             check=False,
+            creationflags=hidden_process_flags(),
         )
     except (OSError, subprocess.SubprocessError):
         return []
@@ -1030,6 +1511,7 @@ class NullEngine:
     name = "none"
     supports_seek = False
     supports_pause = False
+    native_kinds = None
 
     def play(self, path, offset=0.0):
         raise PlaybackError(NO_ENGINE_MESSAGE)
@@ -1056,6 +1538,7 @@ class PygameEngine:
     name = "pygame"
     supports_seek = True
     supports_pause = True
+    native_kinds = PYGAME_NATIVE_KINDS
 
     def __init__(self):
         import pygame
@@ -1077,7 +1560,12 @@ class PygameEngine:
                 # Old SDL_mixer builds reject start=; play, then position.
                 music.play()
                 if offset > 0:
-                    music.set_pos(offset)
+                    try:
+                        music.set_pos(offset)
+                    except Exception:
+                        # Do not leave it playing from 0:00 behind the error.
+                        music.stop()
+                        raise
         except Exception as error:
             raise PlaybackError(f"pygame could not play this file: {error}")
 
@@ -1093,11 +1581,26 @@ class PygameEngine:
         except Exception:
             pass
 
+    def release(self):
+        """Stop and close the loaded file.
+
+        pygame keeps the music file open until another one is loaded, which
+        on Windows blocks renaming the audio or deleting a playback copy.
+        """
+        self.stop()
+        unload = getattr(self._pygame.mixer.music, "unload", None)
+        if unload is not None:
+            try:
+                unload()
+            except Exception:
+                pass
+        self._path = None
+
     def finished(self):
         return not self._pygame.mixer.music.get_busy()
 
     def close(self):
-        self.stop()
+        self.release()
         try:
             self._pygame.mixer.quit()
         except Exception:
@@ -1110,6 +1613,7 @@ class MciEngine:
     name = "MCI"
     supports_seek = True
     supports_pause = True
+    native_kinds = MCI_NATIVE_KINDS
 
     ALIAS = "txtfromaudio"
 
@@ -1122,10 +1626,19 @@ class MciEngine:
         self._buffer = ctypes.create_unicode_buffer(512)
         self._open = False
 
+    def _error_text(self, code):
+        try:
+            text = self._ctypes.create_unicode_buffer(256)
+            if self._ctypes.windll.winmm.mciGetErrorStringW(code, text, 256):
+                return text.value
+        except Exception:
+            pass
+        return "the command failed"
+
     def _send(self, command):
         code = self._mci(command, self._buffer, 512, 0)
         if code:
-            raise PlaybackError(f"MCI error {code}: {command}")
+            raise PlaybackError(f"MCI error {code}: {self._error_text(code)}")
         return self._buffer.value
 
     def play(self, path, offset=0.0):
@@ -1134,7 +1647,11 @@ class MciEngine:
         device = "waveaudio" if path.suffix.lower() == ".wav" else "mpegvideo"
         self._send(f'open "{path}" type {device} alias {self.ALIAS}')
         self._open = True
-        self._send(f"play {self.ALIAS} from {int(max(0.0, offset) * 1000)}")
+        try:
+            self._send(f"play {self.ALIAS} from {int(max(0.0, offset) * 1000)}")
+        except PlaybackError:
+            self.stop()
+            raise
 
     def pause(self):
         if self._open:
@@ -1149,10 +1666,16 @@ class MciEngine:
             return
         try:
             self._send(f"stop {self.ALIAS}")
+        except Exception:
+            pass
+        try:
             self._send(f"close {self.ALIAS}")
         except Exception:
             pass
         self._open = False
+
+    def release(self):
+        self.stop()
 
     def finished(self):
         if not self._open:
@@ -1168,68 +1691,93 @@ class MciEngine:
 
 
 class SubprocessEngine:
-    """ffplay / mpv / mpg123 / afplay / paplay / aplay.
+    """ffplay / mpv / afplay / paplay / aplay / mpg123 as a child process.
 
     Pause is SIGSTOP/SIGCONT on POSIX; seeking restarts the player at the
-    new offset. afplay and the raw PCM players cannot seek.
+    new offset. afplay and the raw players cannot seek. Their stderr is
+    kept, so a player that rejects a file reports why instead of silently
+    "finishing" at once.
     """
 
     supports_pause = True
 
+    # name, can seek, kinds it decodes itself (None: everything FFmpeg does)
+    PLAYERS = (
+        ("ffplay", True, None),
+        ("mpv", True, None),
+        ("afplay", False, frozenset({"wav", "aiff", "aifc", "mp3", "mp4",
+                                     "adts", "flac", "caf", "au"})),
+        ("paplay", False, frozenset({"wav", "aiff", "flac", "ogg-vorbis",
+                                     "au", "wave64", "caf"})),
+        ("aplay", False, frozenset({"wav", "au"})),
+        ("mpg123", False, frozenset({"mp3", "mpeg-audio"})),
+    )
+
     def __init__(self):
         self._proc = None
         self._paused = False
+        self._errors = None
+        self._error = None
         self._tool = None
         self._endpoint = None
         self.supports_seek = False
+        self.native_kinds = None
 
         # SIGSTOP/SIGCONT pause only exists on POSIX. On Windows MCI is the
         # preferred fallback; a bare ffplay can play but not pause.
         self.supports_pause = os.name == "posix"
 
-        candidates = []
-        if sys.platform == "darwin":
-            candidates.append(("afplay", False))
-        candidates.extend([
-            ("ffplay", True),
-            ("mpv", True),
-            ("mpg123", False),
-        ])
-        if sys.platform != "win32":
-            candidates.extend([("paplay", False), ("aplay", False)])
-
-        for name, can_seek in candidates:
+        # Seekable players first (afplay used to win on macOS although it
+        # cannot seek); mpg123 last because it plays nothing but MPEG audio.
+        for name, can_seek, kinds in self.PLAYERS:
+            if name == "afplay" and sys.platform != "darwin":
+                continue
+            if name in ("paplay", "aplay") and sys.platform == "win32":
+                continue
             path = find_program(name)
             if path:
                 self._tool = path
                 self._endpoint = name
                 self.supports_seek = can_seek
+                self.native_kinds = kinds
                 break
         if not self._tool:
-            raise RuntimeError("no ffplay/mpv/mpg123/afplay available")
+            raise RuntimeError("no ffplay/mpv/afplay/paplay/aplay/mpg123 available")
         self.name = f"{self._endpoint} (process)"
+        # A failure only shows once the process has exited, too late to
+        # retry with a converted copy, so unknown formats are converted.
+        self.strict_formats = self.native_kinds is not None
 
     def _command(self, path, offset):
         path = str(path)
         offset = max(0.0, float(offset))
         if self._endpoint == "ffplay":
-            return [self._tool, "-nodisp", "-autoexit", "-loglevel", "quiet",
+            return [self._tool, "-nodisp", "-autoexit", "-hide_banner",
+                    "-loglevel", "error", "-nostats",
                     "-ss", f"{offset:.3f}", path]
         if self._endpoint == "mpv":
-            return [self._tool, "--no-video", "--really-quiet",
-                    f"--start={offset:.3f}", path]
+            return [self._tool, "--no-video", "--msg-level=all=error",
+                    "--input-terminal=no", f"--start={offset:.3f}", path]
+        if self._endpoint in ("aplay", "mpg123"):
+            return [self._tool, "-q", path]
         return [self._tool, path]
 
     def play(self, path, offset=0.0):
         self.stop()
+        self._error = None
+        errors = tempfile.TemporaryFile()
         try:
             self._proc = subprocess.Popen(
                 self._command(path, offset),
+                stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stderr=errors,
+                creationflags=hidden_process_flags(),
             )
         except OSError as error:
+            errors.close()
             raise PlaybackError(f"Could not start {self._endpoint}: {error}")
+        self._errors = errors
         self._paused = False
 
     def pause(self):
@@ -1249,27 +1797,62 @@ class SubprocessEngine:
                 pass
 
     def stop(self):
-        process = self._proc
-        self._proc = None
-        self._paused = False
-        if process is None:
-            return
+        process, self._proc = self._proc, None
+        paused, self._paused = self._paused, False
+        errors, self._errors = self._errors, None
+        if process is not None:
+            try:
+                if process.poll() is None:
+                    process.terminate()
+                    if paused and hasattr(signal, "SIGCONT"):
+                        # A stopped process acts on SIGTERM only once it is
+                        # continued; otherwise every stop/seek while paused
+                        # hung for a second and then needed SIGKILL.
+                        try:
+                            process.send_signal(signal.SIGCONT)
+                        except OSError:
+                            pass
+                    try:
+                        process.wait(timeout=1.0)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait(timeout=1.0)
+            except (OSError, subprocess.SubprocessError):
+                pass
+        if errors is not None:
+            errors.close()
+
+    def release(self):
+        self.stop()
+
+    def _error_tail(self):
+        if self._errors is None:
+            return ""
         try:
-            if process.poll() is None:
-                process.terminate()
-                try:
-                    process.wait(timeout=1.0)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-        except OSError:
-            pass
+            self._errors.seek(0)
+            text = self._errors.read().decode("utf-8", "replace")
+        except (OSError, ValueError):
+            return ""
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        return " ".join(lines[-3:])[:500]
 
     def finished(self):
         if self._proc is None:
             return True
         if self._paused:
             return False
-        return self._proc.poll() is not None
+        code = self._proc.poll()
+        if code is None:
+            return False
+        if code != 0 and self._error is None:
+            detail = self._error_tail() or f"exit code {code}"
+            self._error = f"{self._endpoint} could not play the file: {detail}"
+        return True
+
+    def take_error(self):
+        """Return and clear the last player failure."""
+        error, self._error = self._error, None
+        return error
 
     def close(self):
         self.stop()
@@ -1287,17 +1870,311 @@ def create_audio_engine():
     return NullEngine(), notes
 
 
+FFMPEG_PROGRESS_KEYS = ("out_time_us", "out_time_ms")
+
+
+def parse_progress_seconds(line):
+    """Seconds decoded so far from an ``ffmpeg -progress`` line, or None.
+
+    out_time_ms is in microseconds as well (an old FFmpeg naming slip).
+    """
+    if isinstance(line, bytes):
+        line = line.decode("ascii", "replace")
+    key, _sep, value = str(line).strip().partition("=")
+    if key not in FFMPEG_PROGRESS_KEYS:
+        return None
+    try:
+        return max(0.0, int(value) / 1_000_000.0)
+    except ValueError:
+        return None
+
+
+def sweep_stale_playback_folders(max_age=None, root=None):
+    """Delete playback folders left behind by crashed or killed sessions."""
+    if max_age is None:
+        max_age = PLAYBACK_STALE_SECONDS
+    root = Path(root) if root is not None else Path(tempfile.gettempdir())
+    cutoff = time.time() - max_age
+    removed = 0
+    try:
+        entries = list(root.glob(PlaybackConverter.PREFIX + "*"))
+    except OSError:
+        return 0
+    for entry in entries:
+        try:
+            if entry.is_dir() and entry.stat().st_mtime < cutoff:
+                shutil.rmtree(entry, ignore_errors=True)
+                removed += 1
+        except OSError:
+            continue
+    return removed
+
+
+def _has_decoded_audio(path):
+    """True when a conversion output holds at least some audio."""
+    if wave_duration(path):
+        return True
+    try:
+        # Multichannel output uses WAVE_FORMAT_EXTENSIBLE, which the wave
+        # module of Python < 3.12 cannot parse.
+        return Path(path).stat().st_size > 1024
+    except OSError:
+        return False
+
+
+class PlaybackConverter:
+    """Decode audio the backend cannot read into a temporary PCM WAV.
+
+    Every GUI session gets one folder in the system temp directory. A copy
+    is reused while its source is unchanged (path, size, mtime); only the
+    most recent ``max_files`` copies are kept, and the folder is deleted on
+    close (or by the next session when this one crashed).
+
+    convert() blocks: the GUI calls it from a worker thread with a token
+    from begin(), so cancel() (another file was selected) also stops a
+    conversion that has not started its FFmpeg process yet.
+    """
+
+    PREFIX = "new_txt_from_audio_GUI-playback-"
+    # Reduce exotic layouts (5.1, 7.1, unknown) to something every backend
+    # opens; mono and stereo pass through untouched.
+    AUDIO_FILTER = "aformat=sample_fmts=s16:channel_layouts=mono|stereo"
+
+    def __init__(self, ffmpeg=None, max_files=None):
+        self.ffmpeg_setting = ffmpeg
+        if max_files is None:
+            max_files = PLAYBACK_CACHE_FILES
+        self.max_files = max(1, int(max_files))
+        self.folder = None
+        self._entries = collections.OrderedDict()   # source key -> WAV path
+        self._processes = set()
+        self._generation = 0
+        self._counter = 0
+        self._lock = threading.Lock()
+        self._atexit_registered = False
+
+    def tool(self):
+        return find_tool(self.ffmpeg_setting) if self.ffmpeg_setting else find_ffmpeg()
+
+    @property
+    def available(self):
+        return bool(self.tool())
+
+    @staticmethod
+    def _key(source):
+        source = Path(source)
+        try:
+            stat = source.stat()
+            resolved = source.resolve()
+        except OSError:
+            return None
+        return (os.path.normcase(str(resolved)), stat.st_size, stat.st_mtime_ns)
+
+    def cached(self, source):
+        """The existing WAV copy of ``source``, or None."""
+        key = self._key(source)
+        if key is None:
+            return None
+        with self._lock:
+            target = self._entries.get(key)
+            if target is None:
+                return None
+            if not target.is_file():
+                self._entries.pop(key, None)
+                return None
+            self._entries.move_to_end(key)
+            return target
+
+    def begin(self):
+        """Token for a conversion started later on another thread."""
+        with self._lock:
+            return self._generation
+
+    def cancel(self):
+        """Stop running conversions and invalidate outstanding tokens."""
+        with self._lock:
+            self._generation += 1
+            processes = list(self._processes)
+        for process in processes:
+            try:
+                if process.poll() is None:
+                    process.terminate()
+            except OSError:
+                pass
+        for process in processes:
+            try:
+                process.wait(timeout=2.0)
+            except (subprocess.TimeoutExpired, OSError):
+                try:
+                    process.kill()
+                except OSError:
+                    pass
+
+    def _ensure_folder(self):
+        with self._lock:
+            if self.folder is not None and self.folder.is_dir():
+                return self.folder
+        sweep_stale_playback_folders()
+        folder = Path(tempfile.mkdtemp(prefix=self.PREFIX))
+        with self._lock:
+            self.folder = folder
+            if not self._atexit_registered:
+                atexit.register(self.close)
+                self._atexit_registered = True
+        return folder
+
+    def command(self, source, output, audio_filter=True):
+        """FFmpeg command line that writes ``source``'s first audio track to
+        ``output`` as 16-bit PCM WAV, reporting progress on stdout."""
+        command = [
+            self.tool() or "ffmpeg", "-nostdin", "-hide_banner",
+            "-loglevel", "error", "-nostats", "-progress", "pipe:1", "-y",
+            "-i", str(source),
+            "-map", "0:a:0", "-vn", "-sn", "-dn",
+        ]
+        if audio_filter:
+            command += ["-af", self.AUDIO_FILTER]
+        command += ["-c:a", "pcm_s16le", "-f", "wav", str(output)]
+        return command
+
+    def _run(self, command, token, progress):
+        """Run FFmpeg; return (exit code, error text, cancelled)."""
+        with tempfile.TemporaryFile() as errors:
+            with self._lock:
+                if token is not None and token != self._generation:
+                    raise PlaybackCancelled("Playback conversion cancelled.")
+                try:
+                    process = subprocess.Popen(
+                        command,
+                        stdin=subprocess.DEVNULL,
+                        stdout=subprocess.PIPE,
+                        stderr=errors,
+                        creationflags=hidden_process_flags(),
+                    )
+                except OSError as error:
+                    raise PlaybackError(f"Could not start FFmpeg: {error}")
+                self._processes.add(process)
+                generation = self._generation
+            try:
+                stream = process.stdout
+                if stream is not None:
+                    for line in stream:
+                        seconds = parse_progress_seconds(line)
+                        if seconds is not None and progress is not None:
+                            try:
+                                progress(seconds)
+                            except Exception:
+                                pass
+                code = process.wait()
+            finally:
+                with self._lock:
+                    self._processes.discard(process)
+                    cancelled = generation != self._generation
+                if process.stdout is not None:
+                    process.stdout.close()
+            errors.seek(0)
+            text = errors.read().decode("utf-8", "replace")
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        return code, " ".join(lines[-4:])[:600], cancelled
+
+    def convert(self, source, token=None, progress=None):
+        """Return a WAV copy of ``source``, converting it if needed.
+
+        ``progress(seconds_decoded)`` is called from this thread. Raises
+        PlaybackCancelled after cancel() and PlaybackError on failure.
+        """
+        source = Path(source)
+        existing = self.cached(source)
+        if existing is not None:
+            return existing
+        if not self.tool():
+            raise PlaybackError(
+                "FFmpeg was not found, so this format cannot be converted for playback."
+            )
+        key = self._key(source)
+        if key is None:
+            raise PlaybackError(f"Cannot read {source}")
+        folder = self._ensure_folder()
+        with self._lock:
+            self._counter += 1
+            number = self._counter
+        stem = re.sub(r"[^A-Za-z0-9._-]+", "_", source.stem).strip("._") or "audio"
+        target = folder / f"{number:03d}-{stem[:40]}.wav"
+        partial = target.with_name(target.name + ".part")
+        detail = ""
+        try:
+            decoded = False
+            # Retry without the channel filter: FFmpeg cannot downmix a few
+            # layouts it does not know.
+            for audio_filter in (True, False):
+                code, detail, cancelled = self._run(
+                    self.command(source, partial, audio_filter), token, progress
+                )
+                if cancelled:
+                    raise PlaybackCancelled("Playback conversion cancelled.")
+                if code == 0 and _has_decoded_audio(partial):
+                    decoded = True
+                    break
+                if "matches no streams" in detail:
+                    detail = "the file has no audio track"
+                    break
+            if not decoded:
+                raise PlaybackError(
+                    f"FFmpeg could not decode {source.name}: "
+                    f"{detail or 'no audio was decoded'}"
+                )
+            os.replace(partial, target)
+        finally:
+            try:
+                partial.unlink()
+            except OSError:
+                pass
+        with self._lock:
+            self._entries[key] = target
+            self._entries.move_to_end(key)
+            stale = []
+            while len(self._entries) > self.max_files:
+                _old_key, old_path = self._entries.popitem(last=False)
+                stale.append(old_path)
+        for old_path in stale:
+            try:
+                old_path.unlink()
+            except OSError:
+                pass   # still open somewhere; removed with the folder
+        return target
+
+    def close(self):
+        """Stop conversions and delete every playback copy."""
+        self.cancel()
+        with self._lock:
+            folder, self.folder = self.folder, None
+            self._entries.clear()
+        if folder is not None:
+            shutil.rmtree(folder, ignore_errors=True)
+
+
 class AudioPlayer:
     """Playback clock that works the same for every backend.
 
     The clock is tracked with time.monotonic() instead of asking the
     backend, so highlighting stays smooth and pause-safe.
+
+    Files the backend cannot decode (see engine_needs_conversion) are
+    played from a WAV copy made by ``converter``. play()/seek() convert on
+    the spot by default; pass convert=False to get ConversionRequired
+    instead, run the conversion elsewhere and hand the result to
+    use_converted().
     """
 
-    def __init__(self, engine=None):
+    def __init__(self, engine=None, converter=None):
         self.engine = engine or NullEngine()
+        self.converter = converter if converter is not None else PlaybackConverter()
         self.path = None
+        self.kind = None
+        self.play_path = None        # WAV copy the backend plays instead
         self.duration = None
+        self.last_error = None       # failure reported when playback ended
+        self._direct_failed = False
         self._state = "stopped"       # stopped / playing / paused
         self._base = 0.0
         self._started = None
@@ -1332,15 +2209,130 @@ class AudioPlayer:
             return max(0.0, value)
         return max(0.0, self._base)
 
+    @property
+    def needs_conversion(self):
+        """True when play() must first make a WAV copy with FFmpeg."""
+        if self.path is None or self.play_path is not None or not self.available:
+            return False
+        if not self.converter.available:
+            return False
+        return self._direct_failed or engine_needs_conversion(self.engine, self.kind)
+
+    def conversion_reason(self):
+        name = getattr(self.engine, "name", "the audio backend")
+        label = describe_audio_kind(self.kind, self.path)
+        if self._direct_failed:
+            return f"{name} could not open {label}"
+        return f"{name} cannot decode {label}"
+
+    def _release_engine(self):
+        release = getattr(self.engine, "release", None)
+        try:
+            if callable(release):
+                release()
+            else:
+                self.engine.stop()
+        except Exception:
+            pass
+
     def load(self, path):
         self.stop()
+        self._release_engine()
+        self.converter.cancel()
         self.path = Path(path)
-        self.duration = detect_duration(path)
+        self.kind = sniff_audio_kind(self.path)
+        self.play_path = self.converter.cached(self.path)
+        self._direct_failed = False
+        self.last_error = None
+        self.duration = detect_duration(self.path, kind=self.kind)
+        if not self.duration and self.play_path is not None:
+            self.duration = wave_duration(self.play_path)
         self._base = 0.0
         self._backend_base = -1.0
         self._state = "stopped"
 
-    def play(self):
+    def unload(self):
+        """Forget the current file and let the backend close it."""
+        self.stop()
+        self._release_engine()
+        self.converter.cancel()
+        self.path = self.kind = self.play_path = self.duration = None
+        self._direct_failed = False
+        self.last_error = None
+
+    def use_converted(self, source, wav):
+        """Play ``wav`` for ``source`` from now on (ignored if another file
+        has been loaded meanwhile). Fills in an unknown duration."""
+        if self.path is None or Path(source) != self.path:
+            return False
+        self.play_path = Path(wav)
+        if not self.duration:
+            self.duration = wave_duration(self.play_path)
+        return True
+
+    def prepare(self, progress=None):
+        """Convert the current file now (blocking) and use the copy."""
+        if self.path is None:
+            raise PlaybackError("Select an audio file first.")
+        source = self.path
+        wav = self.converter.convert(source, progress=progress)
+        self.use_converted(source, wav)
+        return wav
+
+    def _failure_message(self, error):
+        message = str(error) or error.__class__.__name__
+        if self.converter.available or self.play_path is not None:
+            return message
+        native = getattr(self.engine, "native_kinds", None)
+        if native is None or self.kind in native:
+            return message
+        name = getattr(self.engine, "name", "the audio backend")
+        label = describe_audio_kind(self.kind, self.path)
+        return (
+            f"{message}\n\n{name} cannot decode {label} files itself. "
+            "Install FFmpeg (ffmpeg on PATH or next to this script): the GUI "
+            "then converts such files to a temporary WAV for playback. "
+            "Installing ffplay or mpv instead also works."
+        )
+
+    def _playback_target(self, convert):
+        if self.play_path is not None and not Path(self.play_path).is_file():
+            self.play_path = None     # temp copy removed behind our back
+        if self.play_path is not None:
+            return self.play_path
+        if self.needs_conversion:
+            if not convert:
+                raise ConversionRequired(self.conversion_reason())
+            self.prepare()
+            return self.play_path
+        return self.path
+
+    def _engine_play(self, offset, convert):
+        target = self._playback_target(convert)
+        try:
+            self.engine.play(target, offset)
+            return
+        except Exception as error:
+            failure = error
+        if target == self.path and self.converter.available and not self._direct_failed:
+            # The backend rejected the original; FFmpeg may still decode it.
+            self._direct_failed = True
+            if not convert:
+                raise ConversionRequired(self.conversion_reason()) from failure
+            try:
+                self.prepare()
+            except PlaybackCancelled:
+                raise
+            except PlaybackError as conversion_error:
+                raise PlaybackError(f"{failure}\n\n{conversion_error}") from failure
+            try:
+                self.engine.play(self.play_path, offset)
+                return
+            except Exception as error:
+                failure = error
+        raise PlaybackError(self._failure_message(failure)) from failure
+
+    def play(self, convert=True):
         if self.path is None:
             raise PlaybackError("Select an audio file first.")
         if self._state == "playing":
@@ -1348,16 +2340,15 @@ class AudioPlayer:
         start = self._base
         if self.duration and start >= max(0.0, self.duration - 0.02):
             start = 0.0
-        try:
-            if self._state == "paused" and abs(start - self._backend_base) < 1e-6:
+        self.last_error = None
+        if self._state == "paused" and abs(start - self._backend_base) < 1e-6:
+            try:
                 self.engine.resume()
-            else:
-                self.engine.play(self.path, start)
-                self._backend_base = start
-        except PlaybackError:
-            raise
-        except Exception as error:
-            raise PlaybackError(str(error))
+            except Exception as error:
+                raise PlaybackError(str(error))
+        else:
+            self._engine_play(start, convert)
+            self._backend_base = start
         self._base = start
         self._started = time.monotonic()
         self._state = "playing"
@@ -1390,13 +2381,13 @@ class AudioPlayer:
         except Exception:
             pass
 
-    def toggle(self):
+    def toggle(self, convert=True):
         if self._state == "playing":
             self.pause()
         else:
-            self.play()
+            self.play(convert)
 
-    def seek(self, seconds):
+    def seek(self, seconds, convert=True):
         if self.path is None:
             return
         try:
@@ -1407,7 +2398,12 @@ class AudioPlayer:
             target = min(target, self.duration)
         if self._state == "playing":
             try:
-                self.engine.play(self.path, target)
+                self._engine_play(target, convert)
+            except ConversionRequired:
+                # Stopped at the target; playing again resumes from there.
+                self.stop()
+                self._base = target
+                raise
             except Exception as error:
                 self.stop()
                 raise PlaybackError(str(error))
@@ -1423,8 +2419,8 @@ class AudioPlayer:
             self._base = target
             self._backend_base = -1.0
 
-    def skip(self, delta):
-        self.seek(self.position + float(delta))
+    def skip(self, delta, convert=True):
+        self.seek(self.position + float(delta), convert)
 
     def stop(self):
         try:
@@ -1437,24 +2433,41 @@ class AudioPlayer:
         self._state = "stopped"
 
     def update(self):
-        """Advance the clock. Return True when playback just ended."""
+        """Advance the clock. Return True when playback just ended.
+
+        The end is taken from the backend. The detected duration is only an
+        estimate (VBR MP3 headers, damaged files), and stopping the audio
+        when the clock reached it cut recordings short; if the backend is
+        still playing past it, the duration grows with the audio instead.
+        """
         if self._state != "playing":
             return False
-        position = self.position
-        if self.duration and position >= max(0.0, self.duration - 0.03):
-            self._finish(self.duration)
-            return True
         try:
-            ended = self.engine.finished()
+            ended = bool(self.engine.finished())
+            reliable = True
         except Exception:
-            ended = False
+            ended = reliable = False
+        clock = self._base
+        if self._started is not None:
+            clock += time.monotonic() - self._started
+        if not reliable and self.duration and clock >= self.duration:
+            ended = True     # the backend cannot tell; trust the estimate
         if ended:
-            self._finish(position)
+            take_error = getattr(self.engine, "take_error", None)
+            error = take_error() if callable(take_error) else None
+            position = self.position
+            self._finish(position, failed=bool(error))
+            self.last_error = error
             return True
+        if self.duration and clock > self.duration + 0.25:
+            self.duration = clock
         return False
 
-    def _finish(self, position):
-        self._base = self.duration if self.duration else position
+    def _finish(self, position, failed=False):
+        if failed:
+            self._base = max(0.0, self._backend_base)
+        else:
+            self._base = self.duration if self.duration else position
         self._started = None
         self._state = "stopped"
         self._backend_base = -1.0
@@ -1472,6 +2485,7 @@ class AudioPlayer:
             pass
         self.engine = engine
         self._backend_base = -1.0
+        self._direct_failed = False
         return True
 
     def close(self):
@@ -1480,6 +2494,7 @@ class AudioPlayer:
             self.engine.close()
         except Exception:
             pass
+        self.converter.close()
 
 
 # ------------------------------------------------------------
@@ -1487,7 +2502,7 @@ class AudioPlayer:
 # ------------------------------------------------------------
 
 class AudioTextGUI:
-    def __init__(self, root, start_folder=None):
+    def __init__(self, root, start_folder=None, start_file=None):
         self.root = root
         self.root.title("Text from audio - companion editor")
         self.root.geometry("1200x780")
@@ -1527,6 +2542,11 @@ class AudioTextGUI:
         self.lead_seconds = float(self.settings["lead_seconds"])
         self._estimating = False
 
+        # Background FFmpeg conversion of a file the backend cannot decode.
+        self._prepare_path = None       # audio being converted, or None
+        self._play_when_ready = False   # start playback once it is done
+        self._prepare_started = 0.0
+
         engine, self.engine_notes = create_audio_engine()
         self.player = AudioPlayer(engine)
 
@@ -1538,19 +2558,47 @@ class AudioTextGUI:
             for note in self.engine_notes:
                 self.log(note)
             self.log("No audio backend found - editing and sync still work.")
-
-        start = Path(start_folder).expanduser() if start_folder else None
-        if start is None or not start.is_dir():
-            remembered = self.settings.get("last_folder") or ""
-            candidate = Path(remembered).expanduser() if remembered else None
-            if candidate is not None and candidate.is_dir():
-                start = candidate
-        if start is not None:
-            self.open_folder(start)
         else:
-            self.open_folder(APP_DIR, quiet=True)
+            self._log_conversion_support()
+
+        opened = False
+        if start_file:
+            # Open the requested file directly; going through open_folder()
+            # first loaded (and auto-aligned) the folder's first file.
+            requested = Path(start_file).expanduser()
+            if requested.is_file():
+                opened = self.open_audio_file(requested)
+        if not opened:
+            start = Path(start_folder).expanduser() if start_folder else None
+            if start is None or not start.is_dir():
+                remembered = self.settings.get("last_folder") or ""
+                candidate = Path(remembered).expanduser() if remembered else None
+                if candidate is not None and candidate.is_dir():
+                    start = candidate
+            if start is not None:
+                self.open_folder(start)
+            else:
+                self.open_folder(APP_DIR, quiet=True)
 
         self._poll()
+
+    def _log_conversion_support(self):
+        """Tell the user up front when some formats will not play."""
+        engine = self.player.engine
+        native = getattr(engine, "native_kinds", None)
+        if native is None:
+            return
+        if self.player.converter.available:
+            self.log(
+                f"Audio: {engine.name}; FFmpeg converts formats it cannot "
+                "decode (3GP, AMR, AAC/M4A, WMA, WebM...) to a temporary WAV."
+            )
+        else:
+            self.log(
+                f"FFmpeg was not found: {engine.name} cannot play 3GP, AMR, "
+                "AAC/M4A, WMA or WebM recordings. Install FFmpeg (ffmpeg on "
+                "PATH or next to this script) to play every supported format."
+            )
 
     # --------------------------------------------------------
     # User interface
@@ -1650,7 +2698,11 @@ class AudioTextGUI:
         self.filter_var = tk.StringVar(master=self.root)
         filter_entry = ttk.Entry(parent, textvariable=self.filter_var)
         filter_entry.pack(fill=tk.X, pady=(0, 6))
-        self.filter_var.trace_add("write", lambda *_: self.refresh_audio_list())
+        # Filtering works on the scanned list; typing must not rescan the
+        # disk on every keystroke (slow for recursive folders).
+        self.filter_var.trace_add(
+            "write", lambda *_: self.refresh_audio_list(rescan=False)
+        )
 
         tree_frame = ttk.Frame(parent)
         tree_frame.pack(fill=tk.BOTH, expand=True)
@@ -1783,9 +2835,7 @@ class AudioTextGUI:
                     sequence.replace("Control", "Command"),
                     self.on_remove_mark_click,
                 )
-        self.editor.bind(
-            "<Control-space>", lambda event: (self.toggle_play(), "break")[1]
-        )
+        # Ctrl+Space and the other shortcuts are bound in build_menu().
         # Double-click a pinned word to jump the audio to its mark.
         self.editor.bind("<Double-Button-1>", self.on_editor_double_click, add="+")
 
@@ -1908,18 +2958,25 @@ class AudioTextGUI:
         menubar.add_cascade(label="Help", menu=help_menu)
 
         self.root.config(menu=menubar)
-        self.root.bind("<Control-s>", lambda event: (self.save_text(), "break")[1])
-        self.root.bind("<Control-o>", lambda event: (self.choose_folder(), "break")[1])
-        self.root.bind(
-            "<Control-Shift-O>",
-            lambda event: (self.choose_audio_file(), "break")[1],
-        )
-        self.root.bind(
-            "<Control-space>",
-            lambda event: (self.toggle_play(), "break")[1],
-        )
-        self.root.bind(
-            "<Control-r>", lambda event: (self.refine_from_marks(), "break")[1]
+        for sequence, command in self.shortcuts():
+            def handler(_event, command=command):
+                command()
+                return "break"
+            self.root.bind(sequence, handler)
+            # Widget bindings run before the Text class bindings. Bound on
+            # the root only, Ctrl+O first ran Tk's emacs "open line" binding,
+            # which inserts a newline into the transcript (marking it as
+            # modified), and only then opened the folder dialog.
+            self.editor.bind(sequence, handler)
+
+    def shortcuts(self):
+        """(event sequence, command) pairs bound on the window and editor."""
+        return (
+            ("<Control-s>", self.save_text),
+            ("<Control-o>", self.choose_folder),
+            ("<Control-Shift-O>", self.choose_audio_file),
+            ("<Control-space>", self.toggle_play),
+            ("<Control-r>", self.refine_from_marks),
         )
 
     # --------------------------------------------------------
@@ -1961,10 +3018,12 @@ class AudioTextGUI:
             "Open it anyway? Editing the text still works; playback may fail.",
         ):
             return False
-        if self.folder is None or path.parent != self.folder:
+        if self._iid_for(path) is not None:
+            pass   # already listed (e.g. a subfolder of a recursive list)
+        elif self.folder is None or path.parent != self.folder:
             if not self.open_folder(path.parent, quiet=True, select_first=False):
                 return False
-        elif self._iid_for(path) is None:
+        else:
             self.refresh_audio_list()
         if self._iid_for(path) is None:
             # Filtered out or skipped by the folder scan: add it explicitly.
@@ -1992,8 +3051,9 @@ class AudioTextGUI:
             return False
         self.folder = folder.resolve()
         self.folder_label.config(text=str(self.folder))
+        self.audio_files = []         # the old folder's list must not reappear
         if self.filter_var.get():
-            self.filter_var.set("")   # trace refreshes the list
+            self.filter_var.set("")
         self.refresh_audio_list()
         if self.audio_files and select_first:
             first = self.audio_files[0]
@@ -2001,11 +3061,11 @@ class AudioTextGUI:
             if not quiet:
                 self.set_status(f"{len(self.audio_files)} audio file(s) in {self.folder.name}")
         elif not self.audio_files:
-            self.player.stop()
+            self._cancel_prepare()
+            self.player.unload()
             self.current_audio = None
             self.text_path = None
             self.sync_path = None
-            self.player.duration = None
             self._set_editor_text("")
             self._update_text_header()
             self._update_playback_widgets()
@@ -2044,11 +3104,14 @@ class AudioTextGUI:
         )
         return iid
 
-    def refresh_audio_list(self):
+    def refresh_audio_list(self, rescan=True):
         if self.folder is None:
             return
-        files = scan_audio(self.folder, recursive=self._recursive_enabled())
-        self.audio_files = files
+        if rescan:
+            self.audio_files = scan_audio(
+                self.folder, recursive=self._recursive_enabled()
+            )
+        files = self.audio_files
 
         needle = ""
         if hasattr(self, "filter_var"):
@@ -2111,6 +3174,7 @@ class AudioTextGUI:
 
     def load_audio(self, path):
         path = Path(path)
+        self._cancel_prepare()
         if self.current_audio is not None:
             self.player.stop()
 
@@ -2123,8 +3187,9 @@ class AudioTextGUI:
         self._set_editor_text("")
         self._update_text_header()
 
-        if self.text_path.exists():
-            self._set_editor_text(read_text(self.text_path))
+        text = self._read_companion_text() if self.text_path.exists() else None
+        if text is not None:
+            self._set_editor_text(text)
             self._set_dirty(False)
             loaded = self._load_sync_file()
             if not loaded:
@@ -2205,13 +3270,31 @@ class AudioTextGUI:
         self._set_dirty(False)   # discard once, do not ask again for this file
         return True
 
+    def _read_companion_text(self):
+        """Text of the companion file, or None when it cannot be read."""
+        try:
+            text, encoding = read_text_with_encoding(self.text_path)
+        except OSError as error:
+            self.log(f"Could not read {self.text_path}: {error}")
+            self.set_status(f"Could not read {self.text_path.name}; see the log.")
+            return None
+        if encoding != "utf-8":
+            self.log(
+                f"{self.text_path.name} is not UTF-8; read it as {encoding}. "
+                "Saving writes UTF-8."
+            )
+        return text
+
     def reload_text(self):
         if self.current_audio is None or self.text_path is None:
             return
         if not self.confirm_discard():
             return
         if self.text_path.exists():
-            self._set_editor_text(read_text(self.text_path))
+            text = self._read_companion_text()
+            if text is None:
+                return
+            self._set_editor_text(text)
             self._load_sync_file()
             self.set_status(f"Reloaded {self.text_path.name}")
         else:
@@ -2245,7 +3328,10 @@ class AudioTextGUI:
     def _engine_summary(self):
         if isinstance(self.player.engine, NullEngine):
             return "Audio: no backend"
-        return f"Audio: {getattr(self.player.engine, 'name', 'unknown')}"
+        name = getattr(self.player.engine, "name", "unknown")
+        if self.player.play_path is not None:
+            return f"Audio: {name} (WAV copy by FFmpeg)"
+        return f"Audio: {name}"
 
     def _update_playback_widgets(self):
         duration = self.player.duration
@@ -2269,8 +3355,15 @@ class AudioTextGUI:
         if not self.player.available:
             self.install_audio_support()
             return
+        if self._prepare_path is not None:
+            # The button reads "Cancel" while a file is being converted.
+            self._cancel_prepare("Playback preparation cancelled.")
+            return
         try:
-            self.player.toggle()
+            self.player.toggle(convert=False)
+        except ConversionRequired as notice:
+            self._start_prepare(str(notice))
+            return
         except PlaybackError as error:
             messagebox.showerror("Playback error", str(error))
             return
@@ -2278,9 +3371,123 @@ class AudioTextGUI:
         self._update_highlight(self.player.position)
 
     def _update_play_button(self):
-        self.play_button.config(text="Pause" if self.player.is_playing else "Play")
+        if self._prepare_path is not None:
+            text = "Cancel"
+        else:
+            text = "Pause" if self.player.is_playing else "Play"
+        self.play_button.config(text=text)
+
+    # The backend cannot decode the file: FFmpeg makes a WAV copy in a
+    # worker thread, so a long recording does not freeze the window, and
+    # playback starts when it is ready.
+
+    def _start_prepare(self, reason=""):
+        path = self.current_audio
+        if path is None or self._prepare_path == path:
+            return
+        converter = self.player.converter
+        token = converter.begin()
+        self._prepare_path = path
+        self._play_when_ready = True
+        self._prepare_started = time.monotonic()
+        detail = f" ({reason})" if reason else ""
+        self.log(f"Converting {path.name} to a temporary WAV for playback{detail}...")
+        self.set_status(f"Preparing {path.name} for playback with FFmpeg...")
+        self._update_play_button()
+        threading.Thread(
+            target=self._prepare_worker, args=(converter, path, token), daemon=True
+        ).start()
+
+    def _prepare_worker(self, converter, path, token):
+        last_report = [0.0]
+
+        def progress(seconds):
+            now = time.monotonic()
+            if now - last_report[0] >= 0.25:
+                last_report[0] = now
+                self.worker_queue.put(("prepare_progress", (path, seconds)))
+
+        try:
+            wav = converter.convert(path, token=token, progress=progress)
+        except PlaybackCancelled:
+            self.worker_queue.put(("prepare_done", (path, None, None)))
+        except Exception as error:
+            self.worker_queue.put(("prepare_done", (path, None, str(error) or repr(error))))
+        else:
+            self.worker_queue.put(("prepare_done", (path, wav, None)))
+
+    def _on_prepare_progress(self, path, seconds):
+        if path != self._prepare_path:
+            return
+        duration = self.player.duration
+        if duration:
+            percent = max(0, min(99, int(seconds / duration * 100)))
+            self.set_status(f"Preparing {path.name} for playback: {percent}%")
+        else:
+            self.set_status(
+                f"Preparing {path.name} for playback: {format_clock(seconds)} decoded"
+            )
+
+    def _on_prepare_done(self, path, wav, error):
+        if path != self._prepare_path:
+            return   # cancelled, or a newer request owns the button
+        play = self._play_when_ready
+        self._prepare_path = None
+        self._play_when_ready = False
+        self._update_play_button()
+        if path != self.current_audio:
+            return
+        if error:
+            self.log(f"Playback conversion failed: {error}")
+            self.set_status("This file could not be prepared for playback; see the log.")
+            messagebox.showerror("Playback error", error)
+            return
+        if wav is None:
+            self.set_status("Playback preparation cancelled.")
+            return
+        had_duration = bool(self.player.duration)
+        self.player.use_converted(path, wav)
+        if not had_duration and self.player.duration:
+            self._update_playback_widgets()
+        else:
+            self.engine_label.config(text=self._engine_summary())
+        elapsed = time.monotonic() - self._prepare_started
+        self.log(f"Ready to play {path.name} (converted in {elapsed:.1f} s).")
+        if play:
+            self.toggle_play()
+            if self.player.is_playing:
+                self.set_status(f"Playing {path.name}")
+        else:
+            self.set_status(f"{path.name} is ready to play.")
+
+    def _cancel_prepare(self, message=None):
+        if self._prepare_path is None:
+            return
+        self._prepare_path = None
+        self._play_when_ready = False
+        self.player.converter.cancel()
+        self._update_play_button()
+        if message:
+            self.set_status(message)
+
+    def _seek_player(self, action, *args):
+        """Run a player seek; True when it worked.
+
+        Only playback that already runs can need a conversion here; it
+        stops at the target and resumes from there once the copy is ready.
+        """
+        try:
+            action(*args, convert=False)
+        except ConversionRequired as notice:
+            self._start_prepare(str(notice))
+            return False
+        except PlaybackError as error:
+            messagebox.showerror("Playback error", str(error))
+            return False
+        return True
 
     def stop_playback(self):
+        self._cancel_prepare()
         self.player.stop()
         self._update_play_button()
         self._set_scale_position(0.0)
@@ -2299,10 +3506,7 @@ class AudioTextGUI:
                 "play/pause/seek support (Tools -> Install audio support).",
             )
             return
-        try:
-            self.player.skip(delta)
-        except PlaybackError as error:
-            messagebox.showerror("Playback error", str(error))
+        if not self._seek_player(self.player.skip, delta):
             return
         self._set_scale_position(self.player.position)
         self._update_highlight(self.player.position)
@@ -2330,10 +3534,7 @@ class AudioTextGUI:
         if not self.player.can_seek:
             self._set_scale_position(self.player.position)
             return
-        try:
-            self.player.seek(target)
-        except PlaybackError as error:
-            messagebox.showerror("Playback error", str(error))
+        self._seek_player(self.player.seek, target)
         self._update_highlight(self.player.position)
 
     def _set_scale_position(self, position):
@@ -2368,7 +3569,15 @@ class AudioTextGUI:
             self._update_highlight(position)
             if ended:
                 self._last_active_mark = None
-                self.set_status("Playback finished.")
+                failure = self.player.last_error
+                if failure:
+                    # A player process rejected the file; it used to look
+                    # like the recording had simply finished at once.
+                    self.player.last_error = None
+                    self.log(f"Playback failed: {failure}")
+                    self.set_status("Playback failed; see the log.")
+                else:
+                    self.set_status("Playback finished.")
 
         self._poll_id = self.root.after(POLL_INTERVAL_MS, self._poll)
 
@@ -2649,10 +3858,7 @@ class AudioTextGUI:
                 "This backend cannot seek; the mark is at " + format_offset(time_value)
             )
             return
-        try:
-            self.player.seek(time_value)
-        except PlaybackError as error:
-            messagebox.showerror("Playback error", str(error))
+        if not self._seek_player(self.player.seek, time_value):
             return
         self._set_scale_position(self.player.position)
         self._update_highlight(self.player.position)
@@ -2807,7 +4013,7 @@ class AudioTextGUI:
 
         self._estimating = True
         self.estimate_button.state(["disabled"])
-        tool = find_program("ffmpeg") if SPEECH_ALIGNMENT else None
+        tool = find_ffmpeg() if SPEECH_ALIGNMENT else None
         if tool:
             self.log("Auto-estimate: looking for speech and pauses with FFmpeg...")
             self.set_status("Auto-estimate: analysing speech pauses...")
@@ -2831,7 +4037,7 @@ class AudioTextGUI:
         duration = self.player.duration
         if not text.strip() or not duration:
             return
-        tool = find_program("ffmpeg") if SPEECH_ALIGNMENT else None
+        tool = find_ffmpeg() if SPEECH_ALIGNMENT else None
         self.log(
             f"Auto-align: estimating sync points for {Path(audio).name} "
             f"({'speech pauses' if tool else 'word length'})..."
@@ -3143,11 +4349,10 @@ class AudioTextGUI:
 
         self.log("$ " + " ".join(f'"{part}"' if " " in part else part
                                  for part in command))
-        creationflags = 0
-        if sys.platform == "win32":
-            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
         try:
+            # Its own process tree, so Stop also ends the ffmpeg/ASR
+            # processes the transcriber starts (see stop_process_tree).
             process = subprocess.Popen(
                 command,
                 cwd=str(script.parent),
@@ -3158,13 +4363,16 @@ class AudioTextGUI:
                 encoding="utf-8",
                 errors="replace",
                 bufsize=1,
-                creationflags=creationflags,
                 env=self._child_environment(),
+                **tree_popen_options(),
             )
         except OSError as error:
+            # The same error would repeat for every queued file.
+            self.log(f"Could not run transcriber: {error}")
             messagebox.showerror("Could not run transcriber", str(error))
-            self.run_failures += 1
-            self._start_next_transcription()
+            self.run_failures += 1 + len(self.run_queue)
+            self.run_queue = []
+            self._finish_run()
             return
 
         self.transcriber_proc = process
@@ -3220,6 +4428,10 @@ class AudioTextGUI:
                 self._on_install_done(*payload)
             elif kind == "align_done":
                 self._on_align_done(*payload)
+            elif kind == "prepare_progress":
+                self._on_prepare_progress(*payload)
+            elif kind == "prepare_done":
+                self._on_prepare_done(*payload)
 
     def _on_transcriber_done(self, process, audio, code):
         if process is not self.transcriber_proc:
@@ -3246,7 +4458,11 @@ class AudioTextGUI:
             return
         text_file = companion_path(audio, TEXT_SUFFIX)
         if text_file.exists():
-            self._set_editor_text(read_text(text_file))
+            self.text_path = text_file
+            text = self._read_companion_text()
+            if text is None:
+                return
+            self._set_editor_text(text)
             self._set_dirty(False)
             loaded = self._load_sync_file()
             if not loaded:
@@ -3280,10 +4496,7 @@ class AudioTextGUI:
         if process is None:
             return
         self.log("Stopping transcriber...")
-        try:
-            process.terminate()
-        except OSError:
-            pass
+        stop_process_tree(process)
 
     # --------------------------------------------------------
     # Tools
@@ -3315,11 +4528,13 @@ class AudioTextGUI:
         try:
             result = subprocess.run(
                 command,
+                stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
                 encoding="utf-8",
                 errors="replace",
+                creationflags=hidden_process_flags(),
             )
             self.worker_queue.put(
                 ("install_done", (result.returncode == 0, result.stdout))
@@ -3366,6 +4581,7 @@ class AudioTextGUI:
             self.install_button.destroy()
             self.install_button = None
         self.log(f"Audio backend ready: {self._engine_summary()}")
+        self._log_conversion_support()
         self.set_status("Audio support installed. Playback ready.")
         messagebox.showinfo(
             "Audio support ready",
@@ -3410,6 +4626,9 @@ class AudioTextGUI:
             "transcript already follows the audio.\n\n"
             "Marks are stored in <audio name>.sync.json next to the audio, "
             "so they survive restarts and text edits.\n\n"
+            "Formats the audio backend cannot decode (3GP, AMR, AAC/M4A, "
+            "WMA, WebM...) are converted once with FFmpeg to a temporary WAV "
+            "when you press Play; the copies are deleted on exit.\n\n"
             f"Shortcuts: {add_key}+O open folder, {add_key}+Shift+O open an "
             f"audio file, {add_key}+S save text, {add_key}+R fill from "
             f"marks, {add_key}+Space play/pause.",
@@ -3434,22 +4653,26 @@ class AudioTextGUI:
         if not self.confirm_discard():
             return
         self._save_settings()
+        self.shutdown()
+        self.root.destroy()
+
+    def shutdown(self):
+        """Stop timers, child processes and playback; delete temp copies."""
+        if self._closing:
+            return
         self._closing = True
         if self._poll_id is not None:
             try:
                 self.root.after_cancel(self._poll_id)
             except tk.TclError:
                 pass
+        self._cancel_prepare()
         if self.transcriber_proc is not None:
-            try:
-                self.transcriber_proc.terminate()
-            except OSError:
-                pass
+            stop_process_tree(self.transcriber_proc, grace=1.0, wait=True)
         try:
             self.player.close()
         except Exception:
             pass
-        self.root.destroy()
 
 
 # ------------------------------------------------------------
@@ -3478,12 +4701,15 @@ def main(argv=None):
             start_folder = start
 
     root = tk.Tk()
-    app = AudioTextGUI(root, start_folder=start_folder)
-    if start_file is not None:
-        root.after(0, lambda: app.open_audio_file(start_file))
+    app = AudioTextGUI(root, start_folder=start_folder, start_file=start_file)
     if install_audio:
         root.after(300, app.install_audio_support)
-    root.mainloop()
+    try:
+        root.mainloop()
+    except KeyboardInterrupt:
+        # Ctrl+C in the terminal: still stop the transcriber's process
+        # tree and remove the playback copies.
+        app.shutdown()
     return 0
 
 

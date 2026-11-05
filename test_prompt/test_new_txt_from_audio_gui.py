@@ -109,6 +109,8 @@ class SignatureParityTests(unittest.TestCase):
     SAMPLES = {
         "wave": b"RIFF\x24\x00\x00\x00WAVEfmt " + b"\x00" * 8,
         "rf64": b"rf64\xff\xff\xff\xffWAVEds64" + b"\x00" * 8,
+        "RF64": b"RF64\xff\xff\xff\xffWAVEds64" + b"\x00" * 8,
+        "BW64": b"BW64\xff\xff\xff\xffWAVEds64" + b"\x00" * 8,
         "wave64": bytes.fromhex("3666666611cf11a0") + b"\x00" * 8,
         "flac": b"fLaC\x00\x00\x00\x22" + b"\x00" * 8,
         "ogg": b"OggS\x00\x02\x00\x00" + b"\x00" * 8,
@@ -139,8 +141,8 @@ class SignatureParityTests(unittest.TestCase):
     def test_known_containers_are_recognised(self):
         with tempfile.TemporaryDirectory() as tmp:
             folder = Path(tmp)
-            for name in ("wave", "flac", "ogg", "aiff", "m4a", "3gp", "amr",
-                         "asf", "mp3", "mpeg_audio", "mpeg_stream"):
+            for name in ("wave", "RF64", "BW64", "flac", "ogg", "aiff", "m4a",
+                         "3gp", "amr", "asf", "mp3", "mpeg_audio", "mpeg_stream"):
                 target = folder / name
                 target.write_bytes(self.SAMPLES[name])
                 self.assertTrue(gui.has_audio_signature(target), name)
