@@ -2,6 +2,7 @@
 """Write a voice-isolated FLAC beside a recording, without changing the source."""
 
 import argparse
+import contextlib
 import os
 import shutil
 import subprocess
@@ -16,9 +17,24 @@ if len(_resolved.parents) >= 3:
 from path_args import resolve_paths
 
 
+@contextlib.contextmanager
+def _quiet_stderr():
+    """Silence native libraries (e.g. mpg123) that write straight to fd 2."""
+    saved = os.dup(2)
+    devnull = os.open(os.devnull, os.O_WRONLY)
+    os.dup2(devnull, 2)
+    try:
+        yield
+    finally:
+        os.dup2(saved, 2)
+        os.close(saved)
+        os.close(devnull)
+
+
 def load_recording(api, source):
     try:
-        return api.load_audio(str(source))
+        with _quiet_stderr():
+            return api.load_audio(str(source))
     except RuntimeError as error:  # libsndfile cannot open some formats (e.g. AAC).
         ffmpeg = shutil.which("ffmpeg")
         if not ffmpeg:
@@ -27,8 +43,10 @@ def load_recording(api, source):
     with tempfile.TemporaryDirectory() as tmp:
         wav = Path(tmp) / "decoded.wav"
         subprocess.run([ffmpeg, "-nostdin", "-v", "error", "-i", str(source.absolute()),
-                        "-map", "0:a:0", "-ac", "1", "-ar", "48000", "-c:a", "pcm_f32le", str(wav)], check=True)
-        return api.load_audio(str(wav))
+                        "-map", "0:a:0", "-ac", "1", "-ar", "48000", "-c:a", "pcm_f32le", str(wav)],
+                       check=True, stderr=subprocess.DEVNULL)
+        with _quiet_stderr():
+            return api.load_audio(str(wav))
 
 
 def isolate_file(source):
