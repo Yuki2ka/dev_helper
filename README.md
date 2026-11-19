@@ -18,7 +18,7 @@ Quick start: copy something not big to clipboard and run any script from `_stand
 Typical path resolution priority: **CLI Args** $\rightarrow$ **stdin** $\rightarrow$ **Clipboard** $\rightarrow$ **Constant** $\rightarrow$ **CWD**
 So by default it will create files in folder where you put the script.
 
-100% offline. Does not contain any web-api or online services. But can connect to some local servers, like ComfyUI, LM-studio.
+Processing runs locally. Model-based scripts may download weights on first use. But can connect to some local servers, like ComfyUI, LM-studio.
 
 ! Note: these scripts may change or remove files based on links in your clipboard. Sometimes without additional confirmations.
 
@@ -35,6 +35,7 @@ So by default it will create files in folder where you put the script.
 | `new_img` | Create numbered placeholder color images with grid overlay. Useful for UI mockups and testing. |
 | `new_audio` | Generate sine wave audio files, choose req, notes or pentatonic scale quantization. wav, opus. |
 | `new_audio_sweep` | Generate frequency sweep audio files. Can quantize to pentatonic scale. |
+| `new_isolated_audio` | Remove background noise from a recording and write a compressed `.isolated.flac` companion. |
 | `new_txt_from_audio` | Transcribe audio files/folders, output - txt companions near input files, using local audio.cpp and Qwen3-ASR GGUF. |
 | `new_voice` | Create numbered speech files using text-to-speech (pytttsx3). wav, opus. |
 | `random_password` | Generate a random password and copy it to clipboard. |
@@ -48,6 +49,19 @@ So by default it will create files in folder where you put the script.
 
 All scripts should use exactly same `command_paths.py` to get and resolve file lists as all others in this project.
 
+
+## Isolate a voice from a recording
+
+With Python 3.10 or newer, run:
+
+```sh
+python -m pip install inworld-voice-isolation
+python dev_helper/new_file/new_isolated_audio.py "Interview take 1.wav"
+```
+
+This writes `Interview take 1.isolated.flac` beside the input (48 kHz mono, 24-bit FLAC). It leaves the original untouched and refuses to overwrite an existing companion. WAV and FLAC need no external encoder. For formats your libsndfile cannot read, such as M4A/AAC, install `ffmpeg` on `PATH` (e.g. `sudo apt install ffmpeg` on Debian/Ubuntu).
+
+On first use, the Inworld package downloads the offline checkpoint from [inworld/voice-isolator](https://huggingface.co/inworld/voice-isolator) into the standard Hugging Face cache and verifies its checksum. No audio is uploaded. Set `HF_HOME` to choose the cache location; after the first download, `HF_HUB_OFFLINE=1` allows cache-only runs. No model file is needed beside the script.
 
 ## Utility scripts
 
